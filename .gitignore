@@ -1,0 +1,37 @@
+# Raw public datasets: large, and re-downloadable from data.go.kr. Only the derived catalog is kept.
+data/
+
+# Copies of sample code kept for local reference.
+tools/reference/
+
+# Android and Gradle
+.gradle/
+.kotlin/
+build/
+local.properties
+captures/
+*.iml
+.idea/
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+
+# Server runtime data
+server/*.db
+
+# Secrets. Never commit these.
+.env
+*.env
+*.jks
+*.keystore
+keystore.properties
+
+# SDK binaries are licensed and must not be redistributed.
+*.aar
+
+# Contest material, drafts, reports and the filled application form stay out of the public repository,
+# which is reviewed blind. tools/build_lot_catalog.py writes its quality report here.
+docs/
