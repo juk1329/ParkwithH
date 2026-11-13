@@ -55,12 +55,31 @@ class MainActivity : Activity() {
         val night = resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK == Configuration.UI_MODE_NIGHT_YES
         palette = if (night) Palette.NIGHT else Palette.DAY
         window.decorView.setBackgroundColor(palette.background)
+        applyLaunchMode(intent)
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
+        applyLaunchMode(intent)
         render()
+    }
+
+    /**
+     * The two-car demo console starts the app with `--es mode server`, so nobody has to find the
+     * settings button on two screens. Only the two fixed modes are accepted, never an address, and the
+     * extra is removed once used so a recreated activity cannot undo a later choice in the settings.
+     */
+    private fun applyLaunchMode(intent: Intent?) {
+        val demo = when (intent?.getStringExtra(EXTRA_MODE)) {
+            MODE_SERVER -> false
+            MODE_DEMO -> true
+            else -> return
+        }
+        intent.removeExtra(EXTRA_MODE)
+        if (settings.demoMode == demo) return
+        settings.demoMode = demo
+        service?.backendChanged()
     }
 
     override fun onResume() {
@@ -408,6 +427,9 @@ class MainActivity : Activity() {
 
     companion object {
         const val ACTION_KEYPAD = "app.parkrelay.KEYPAD"
+        private const val EXTRA_MODE = "mode"
+        private const val MODE_SERVER = "server"
+        private const val MODE_DEMO = "demo"
         private const val REQUEST_PERMISSIONS = 1
         private const val SERVICE_RETRY_MILLIS = 1_000L
         private const val PAGE = 32
@@ -441,7 +463,8 @@ class MainActivity : Activity() {
                 "Virtual Console에서 기어를 R, P 순으로 바꾸면 내 차 위치 저장을 물어요."
 
         private const val SERVER_STEPS =
-            "서버에 연결된 상태예요. 버튼 1은 내비 목적지를 코엑스 주차장으로 정해요.\n" +
-                "다른 차가 이 주차장에서 나가면 앱을 닫아도 음성과 알림으로 알려 드려요."
+            "서버에 연결된 상태예요. 차량 2대 장면은 PC의 시연 콘솔에서 순서대로 진행해요.\n" +
+                "버튼 1은 내비 목적지를 코엑스 주차장으로 정해요. 다른 차가 이 주차장에서 나가면 " +
+                "앱을 닫아도 음성과 알림으로 알려 드려요."
     }
 }

@@ -43,6 +43,13 @@ case "$command" in
     if pgrep -f -- "-avd $avd " >/dev/null; then
       echo "$avd is already running"
     else
+      # On the virtual display both cars sit side by side at half size, so one remote view shows the
+      # whole two-car scene. The emulator reads its window from this file at start and saves it at exit.
+      window_ini="${ANDROID_AVD_HOME:-$HOME/.android/avd}/$avd.avd/emulator-user.ini"
+      if [ "$DISPLAY" = "$VIRTUAL_DISPLAY" ] && [ -f "$window_ini" ]; then
+        sed -i -e "s/^window.x = .*/window.x = $((40 + (vehicle - 1) * 1380))/" -e "s/^window.y = .*/window.y = 60/" \
+          -e "s/^window.scale = .*/window.scale = 0.500000/" "$window_ini"
+      fi
       # The last run's log says why it ended, so it is kept. Its exit status and time are the last lines.
       [ -f "$LOG_DIR/$avd.log" ] && mv "$LOG_DIR/$avd.log" "$LOG_DIR/$avd.$(date +%H%M%S).log"
       nohup setsid bash -c 'emulator "$@"; code=$?; echo "$(date +%T) emulator exited with status $code"' _ \
