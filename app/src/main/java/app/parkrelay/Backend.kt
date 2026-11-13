@@ -14,10 +14,15 @@ import java.net.URL
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
+/**
+ * What became of a batch. REJECTED means the server understood the request and refused it, so sending
+ * the same bytes again cannot help. FAILED means it never got an answer, and a retry may.
+ */
+enum class Delivery { ACCEPTED, REJECTED, FAILED }
+
 /** The server boundary. Demo mode swaps this out, so a reviewer can run the APK with no server. */
 interface Backend {
-    /** Returns true once the server has accepted the batch. */
-    fun send(events: List<OutEvent>): Boolean
+    fun send(events: List<OutEvent>): Delivery
 
     fun subscribe(lotId: String, onSignal: (ZoneSignal) -> Unit): Subscription
 
@@ -30,7 +35,7 @@ interface Backend {
 }
 
 class HttpBackend(private val baseUrl: () -> String) : Backend {
-    override fun send(events: List<OutEvent>): Boolean = try {
+    override fun send(events: List<OutEvent>): Delivery = try {
         val connection = URL("${baseUrl()}/v1/events").openConnection() as HttpURLConnection
         connection.requestMethod = "POST"
         connection.connectTimeout = 5_000
@@ -42,20 +47,24 @@ class HttpBackend(private val baseUrl: () -> String) : Backend {
         val code = connection.responseCode
         connection.disconnect()
         Trace.log("backend", "send count=${events.size} status=$code")
-        code in 200..299
+        when (code) {
+            in 200..299 -> Delivery.ACCEPTED
+            in 400..499 -> Delivery.REJECTED
+            else -> Delivery.FAILED
+        }
     } catch (e: Exception) {
         Trace.log("backend", "send failed: $e")
-        false
+        Delivery.FAILED
     }
 
     override fun subscribe(lotId: String, onSignal: (ZoneSignal) -> Unit): Backend.Subscription {
         val cancelled = AtomicBoolean(false)
-        var active: HttpURLConnection? = null
+        val active = java.util.concurrent.atomic.AtomicReference<HttpURLConnection?>()
         val thread = Thread({
             while (!cancelled.get()) {
                 try {
                     val connection = URL("${baseUrl()}/v1/lots/$lotId/stream").openConnection() as HttpURLConnection
-                    active = connection
+                    active.set(connection)
                     connection.connectTimeout = 5_000
                     connection.readTimeout = 0
                     connection.setRequestProperty("Accept", "text/event-stream")
@@ -71,7 +80,7 @@ class HttpBackend(private val baseUrl: () -> String) : Backend {
         thread.start()
         return Backend.Subscription {
             cancelled.set(true)
-            active?.disconnect()
+            active.get()?.disconnect()
         }
     }
 
@@ -140,6 +149,8 @@ object EventCodec {
                     vacancyAges = (0 until ages.length()).map(ages::getLong),
                     leavingSoon = zone.getInt("leaving_soon"),
                     parkedAppCars = zone.getInt("parked_app_cars"),
+                    // Absent on a server from before claims existed.
+                    claims = zone.optInt("claims", 0),
                 )
             },
         )
@@ -152,27 +163,81 @@ object EventCodec {
 /**
  * Events go to disk first and to the network second. The ignition can go off right after P, and
  * underground lots often have no signal, so a send can fail at any point without losing anything.
+ *
+ * The file is sent in batches the server accepts, and only what was answered leaves the file. An
+ * event the server refuses is dropped rather than retried forever in front of everything behind it.
  */
 class EventQueue(directory: File, private val backend: () -> Backend) {
-    private val file = File(directory, "events.queue")
+    private val file = File(directory, FILE_NAME)
+    private val temp = File(directory, "$FILE_NAME.tmp")
     private val executor = Executors.newSingleThreadExecutor()
+
+    @Volatile
+    private var closed = false
+
+    /** After a send that got no answer, new events only go to disk for a while: each try can block for seconds. */
+    private var quietUntil = 0L
 
     fun add(event: OutEvent) {
         executor.execute {
+            if (closed) return@execute
             Trace.guarded("queue add") { file.appendText(EventCodec.encode(event).toString() + "\n") }
-            drain()
+            if (System.currentTimeMillis() >= quietUntil) drain()
         }
     }
 
-    fun flush() = executor.execute { drain() }
+    /** Service start, screen on, or the server choice changing: reasons to try again at once. */
+    fun flush() = executor.execute {
+        quietUntil = 0L
+        drain()
+    }
+
+    /** Consent withdrawn: nothing queued may be sent later, and nothing new is accepted. */
+    fun close() {
+        closed = true
+        executor.execute {
+            Trace.guarded("queue close") {
+                file.delete()
+                temp.delete()
+            }
+        }
+    }
 
     private fun drain() {
         Trace.guarded("queue drain") {
-            if (!file.exists()) return@guarded
-            val lines = file.readLines().filter { it.isNotBlank() }
-            if (lines.isEmpty()) return@guarded
-            if (backend().send(lines.map(::decode))) file.writeText("")
+            while (!closed && file.exists()) {
+                val lines = file.readLines().filter { it.isNotBlank() }
+                if (lines.isEmpty()) return@guarded
+                val batch = lines.take(BATCH_SIZE)
+                // A line this build cannot read will never become readable, so it goes with the batch.
+                val events = batch.mapNotNull { line -> runCatching { decode(line) }.getOrNull() }
+                val settled = events.isEmpty() || deliver(events)
+                if (!settled) {
+                    quietUntil = System.currentTimeMillis() + RETRY_PAUSE_MILLIS
+                    return@guarded
+                }
+                keep(lines.drop(batch.size))
+            }
         }
+    }
+
+    /** True when every event was answered, accepted or refused. False when the server could not be reached. */
+    private fun deliver(events: List<OutEvent>): Boolean = when (backend().send(events)) {
+        Delivery.ACCEPTED -> true
+        Delivery.FAILED -> false
+        Delivery.REJECTED ->
+            // One bad event must not take its neighbours with it: each is offered on its own.
+            if (events.size == 1) {
+                Trace.log("queue", "dropped an event the server refused: ${events.first().type}")
+                true
+            } else {
+                events.all { deliver(listOf(it)) }
+            }
+    }
+
+    private fun keep(lines: List<String>) {
+        temp.writeText(lines.joinToString("") { it + "\n" })
+        if (!temp.renameTo(file)) file.writeText(temp.readText())
     }
 
     private fun decode(line: String): OutEvent {
@@ -188,5 +253,13 @@ class EventQueue(directory: File, private val backend: () -> Backend) {
             evidence = json.optString("evidence").takeIf { it.isNotEmpty() }?.let { app.parkrelay.core.Evidence.valueOf(it) },
             weak = json.optBoolean("weak"),
         )
+    }
+
+    companion object {
+        const val FILE_NAME = "events.queue"
+
+        /** The server takes at most this many events in one request. */
+        const val BATCH_SIZE = 200
+        private const val RETRY_PAUSE_MILLIS = 15_000L
     }
 }

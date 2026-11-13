@@ -47,7 +47,7 @@ class VoiceInput(context: Context) {
         override fun onEndedRecognition() = Trace.log("stt", "ended")
 
         override fun onUpdated(stt: String, completed: Boolean) {
-            Trace.log("stt", "text='$stt' completed=$completed")
+            Trace.log("stt", "text='${Trace.detail(stt)}' completed=$completed")
             if (completed) deliver(stt)
         }
 

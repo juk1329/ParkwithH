@@ -27,6 +27,7 @@ ROOT = Path(__file__).resolve().parent.parent
 CATALOG_PATH = Path(os.environ.get("PARKRELAY_CATALOG", ROOT / "app/src/main/assets/lots.tsv"))
 DATABASE_PATH = os.environ.get("PARKRELAY_DB", str(ROOT / "server/parkrelay.db"))
 HEARTBEAT_SECONDS = 15
+API_VERSION = 2                  # 2 adds CLAIM events and "claims" per zone.
 ZONE_PATTERN = re.compile(r"^[0-9A-Za-z가-힣-]{1,16}$")
 
 
@@ -35,7 +36,9 @@ class EventIn(BaseModel):
 
     eventId: str = Field(min_length=1, max_length=64)
     sessionId: str = Field(min_length=1, max_length=64)
-    type: Literal["PARK", "LEAVING_SOON", "LEAVING_CANCEL", "VACATED", "EXIT", "FULLNESS"]
+    type: Literal[
+        "PARK", "LEAVING_SOON", "LEAVING_CANCEL", "VACATED", "EXIT", "FULLNESS", "CLAIM", "CLAIM_CANCEL"
+    ]
     lotId: str = Field(min_length=1, max_length=32)
     zoneId: str | None = None
     occurredAt: int = Field(gt=0)
@@ -86,7 +89,7 @@ class Store:
         with self.lock:
             rows = self.connection.execute(
                 "SELECT event_id, session_id, type, lot_id, zone_id, occurred_at, search_sec, evidence, weak, fullness "
-                "FROM events WHERE lot_id = ? AND occurred_at >= ? ORDER BY occurred_at",
+                "FROM events WHERE lot_id = ? AND occurred_at >= ? ORDER BY occurred_at, rowid",
                 (lot_id, since),
             ).fetchall()
         return [board.Event(*row[:8], bool(row[8]), row[9]) for row in rows]
@@ -139,8 +142,14 @@ def create_app(database_path: str = DATABASE_PATH, catalog_path: Path = CATALOG_
     app.state.store = store
     app.state.hub = hub
 
+    @app.get("/v1/health")
+    def health() -> dict:
+        """Lets the demo console tell this server from an older one left running on the same port."""
+        return {"ok": True, "api": API_VERSION}
+
     @app.post("/v1/events")
-    def post_events(batch: EventBatch) -> dict:
+    async def post_events(batch: EventBatch) -> dict:
+        # Runs on the event loop on purpose: the hub's queues belong to the loop, and a write is milliseconds.
         accepted = 0
         now = now_ms()
         for item in batch.events:

@@ -30,7 +30,7 @@ object ZoneParser {
     private val BARE_LETTER_AFTER_FLOOR = Regex("""층\s*([A-Za-z])\b""")
 
     private val YES = Regex("""^(네|예|응|어|맞아|맞아요|맞습니다|그래|그래요|좋아|좋아요|저장해|저장해줘)\b""")
-    private val NO = Regex("""^(아니|아니요|아뇨|틀려|틀렸어|됐어|안\s*해)""")
+    private val NO = Regex("""^(아니|아니요|아뇨|틀려|틀렸어|됐어|안\s*해|취소)""")
 
     fun parse(speech: String): SpokenAnswer {
         val text = speech.trim()

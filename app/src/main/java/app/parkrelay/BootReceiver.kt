@@ -9,6 +9,8 @@ class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action != Intent.ACTION_BOOT_COMPLETED) return
         Trace.log("boot", "boot completed")
+        // Without consent the app does nothing at all: no service, no position, no restored session.
+        if (!Settings(context).consent) return
         Trace.guarded("boot start") { ParkingService.start(context) }
     }
 }

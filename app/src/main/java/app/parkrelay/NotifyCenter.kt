@@ -6,6 +6,7 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import app.parkrelay.core.BoardText
 import app.parkrelay.core.Guidance
 import app.parkrelay.core.Lot
 
@@ -18,6 +19,7 @@ import app.parkrelay.core.Lot
  */
 class NotifyCenter(private val context: Context) {
     private val manager = context.getSystemService(NotificationManager::class.java)
+    private var listHasButtons = false
 
     fun createChannels() {
         manager.createNotificationChannel(
@@ -94,11 +96,41 @@ class NotifyCenter(private val context: Context) {
         post(ID_ADVICE, builder.build())
     }
 
+    /**
+     * The list of zones, told once on arriving near the lot. [text] has one line a floor. Moving, it is
+     * a banner that goes away by itself. Stopped, it stays and offers to change or withdraw the zone
+     * this car said it is heading for.
+     */
+    fun zoneList(title: String, text: String, withButtons: Boolean) {
+        val builder = base(title)
+            .setContentText(text.replace("\n", " / "))
+            .setStyle(Notification.BigTextStyle().bigText("$text\n${BoardText.CAVEAT}"))
+        if (withButtons) {
+            builder.addAction(activityAction("다른 구역", MainActivity.ACTION_PICK_HEADING, 40))
+            builder.addAction(serviceAction("알림 취소", ParkingService.ACTION_DECLINE_HEADING, 41))
+        } else {
+            builder.setTimeoutAfter(LIST_BANNER_MILLIS)
+        }
+        listHasButtons = withButtons
+        post(ID_LIST, builder.build())
+    }
+
     /** Nothing that asks for a tap may stay in front of the driver once the car is moving. */
     fun cancelButtons() {
         manager.cancel(ID_PROMPT)
         manager.cancel(ID_SHARE)
         manager.cancel(ID_ADVICE)
+        if (listHasButtons) cancelList()
+    }
+
+    fun cancelList() {
+        listHasButtons = false
+        manager.cancel(ID_LIST)
+    }
+
+    /** Consent withdrawn: nothing of ours stays in the notification area. */
+    fun cancelAll() {
+        listOf(ID_GUIDE, ID_PROMPT, ID_SHARE, ID_ADVICE, ID_LIST).forEach(manager::cancel)
     }
 
     fun cancelPrompt() = manager.cancel(ID_PROMPT)
@@ -107,7 +139,7 @@ class NotifyCenter(private val context: Context) {
 
     private fun post(id: Int, notification: Notification) {
         Trace.guarded("notify") {
-            Trace.log("notify", "post id=$id title=${notification.extras.getString(Notification.EXTRA_TITLE)}")
+            Trace.log("notify", "post id=$id title=${Trace.detail(notification.extras.getString(Notification.EXTRA_TITLE))}")
             manager.notify(id, notification)
         }
     }
@@ -135,9 +167,11 @@ class NotifyCenter(private val context: Context) {
         return Notification.Action.Builder(null, label, pending).build()
     }
 
-    private fun keypadAction(label: String, request: Int): Notification.Action {
+    private fun keypadAction(label: String, request: Int) = activityAction(label, MainActivity.ACTION_KEYPAD, request)
+
+    private fun activityAction(label: String, action: String, request: Int): Notification.Action {
         val intent = Intent(context, MainActivity::class.java)
-            .setAction(MainActivity.ACTION_KEYPAD)
+            .setAction(action)
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         val pending = PendingIntent.getActivity(
             context, request, intent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
@@ -151,7 +185,9 @@ class NotifyCenter(private val context: Context) {
         const val ID_PROMPT = 3
         const val ID_SHARE = 4
         const val ID_ADVICE = 5
+        const val ID_LIST = 6
         private const val BANNER_MILLIS = 10_000L
+        private const val LIST_BANNER_MILLIS = 15_000L
         private const val CHANNEL_STATUS = "status"
         private const val CHANNEL_GUIDE = "guide"
     }

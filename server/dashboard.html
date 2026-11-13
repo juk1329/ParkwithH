@@ -1,69 +1,91 @@
 <!doctype html>
-<html lang="ko">
+<html lang="ko" translate="no">
 <head>
 <meta charset="utf-8">
+<meta name="google" content="notranslate">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ParkwithH 운영사 대시보드</title>
 <style>
-  :root { --bg:#12161c; --panel:#1c222b; --text:#eef1f5; --muted:#9aa4b2; --good:#78dcaa; --warn:#f2c14e; --line:#2c343f; }
+  /* The look of a garage pillar: the floor on a sign-blue band, the zone as one large letter, and
+     beside it the one number that matters. Colour carries meaning only. */
+  :root {
+    --bg:#0d1116; --panel:#181e26; --line:#303944; --text:#f4f6f8; --muted:#a5b0bc;
+    --band:#185cd6; --open:#4ade80; --soon:#ffb840; --taken:#848f9b;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg:#eef1f4; --panel:#ffffff; --line:#d0d6dd; --text:#10161c; --muted:#4e5965;
+      --band:#0f4cbd; --open:#067a43; --soon:#a35c00; --taken:#707a85;
+    }
+  }
   * { box-sizing:border-box; }
-  body { margin:0; background:var(--bg); color:var(--text); font:18px/1.4 system-ui, "Noto Sans KR", sans-serif; padding:24px; word-break:keep-all; }
-  h1 { font-size:34px; margin:0 0 4px; }
-  .sample { color:var(--muted); margin-bottom:20px; }
-  .layout { display:grid; grid-template-columns:minmax(0,3fr) minmax(0,2fr); gap:20px; }
-  @media (max-width:800px) { .layout { grid-template-columns:1fr; } }
-  .zones { display:grid; grid-template-columns:repeat(auto-fill,minmax(210px,1fr)); gap:14px; align-content:start; }
-  .zone { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:16px; }
-  .zone b { font-size:30px; display:block; }
-  .zone.JUST_LEFT { border-color:var(--good); }
-  .zone.LEAVING_SOON { border-color:var(--warn); }
-  .state { font-size:20px; margin:6px 0; }
-  .JUST_LEFT .state { color:var(--good); }
-  .LEAVING_SOON .state { color:var(--warn); }
-  .small { color:var(--muted); font-size:15px; }
-  .log { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:16px; }
-  .log h2 { font-size:20px; margin:0 0 10px; }
+  body { margin:0; background:var(--bg); color:var(--text); padding:28px 24px 48px; word-break:keep-all;
+         font:18px/1.45 "Pretendard", "Noto Sans KR", "Apple SD Gothic Neo", system-ui, sans-serif; }
+  main { max-width:1360px; margin:0 auto; }
+  h1 { font-size:38px; line-height:1.15; margin:0; letter-spacing:-0.01em; }
+  .sample { color:var(--muted); margin:6px 0 24px; max-width:70ch; }
+  .layout { display:grid; grid-template-columns:minmax(0,3fr) minmax(0,2fr); gap:24px; align-items:start; }
+  @media (max-width:860px) { .layout { grid-template-columns:1fr; } }
+  h2 { font-size:22px; margin:0 0 12px; }
+  .floors { display:grid; gap:12px; }
+  .floor { display:grid; grid-template-columns:104px minmax(0,1fr); background:var(--panel);
+           border:1px solid var(--line); border-radius:18px; overflow:hidden; }
+  .band { background:var(--band); color:#fff; display:grid; place-items:center; font-size:36px; font-weight:800; }
+  .zone { display:grid; grid-template-columns:auto minmax(0,1fr) auto; gap:16px; align-items:center;
+          padding:12px 20px; min-height:84px; }
+  .zone + .zone { border-top:1px solid var(--line); }
+  .mark { font-size:44px; font-weight:800; line-height:1; min-width:1.3em; }
+  .mark small { font-size:20px; font-weight:500; color:var(--muted); margin-left:6px; }
+  .notes { color:var(--muted); font-size:17px; text-align:right; }
+  .count { font-size:40px; font-weight:800; font-variant-numeric:tabular-nums; min-width:3.2em; text-align:right; }
+  .open .count { color:var(--open); } .soon .count { color:var(--soon); }
+  .taken .count { color:var(--taken); } .quiet .count { color:var(--taken); font-weight:500; font-size:24px; }
+  .caveat { color:var(--muted); font-size:16px; margin:12px 0 0; }
+  .empty { color:var(--muted); background:var(--panel); border:1px dashed var(--line); border-radius:18px; padding:24px; }
+  .log { background:var(--panel); border:1px solid var(--line); border-radius:18px; padding:18px 20px; }
   table { width:100%; border-collapse:collapse; font-size:15px; font-variant-numeric:tabular-nums; }
-  td { padding:5px 8px 5px 0; border-top:1px solid var(--line); white-space:nowrap; }
-  .empty { color:var(--muted); }
+  td { padding:6px 10px 6px 0; border-top:1px solid var(--line); white-space:nowrap; }
+  tr:first-child td { border-top:0; }
+  td.type { font-weight:700; }
+  .VACATED { color:var(--open); } .LEAVING_SOON { color:var(--soon); }
+  .CLAIM, .CLAIM_CANCEL { color:var(--band); }
+  @media (prefers-color-scheme: dark) { .CLAIM, .CLAIM_CANCEL { color:#6eaaff; } }
+  .who { color:var(--muted); }
 </style>
 </head>
 <body>
+<main>
   <h1 id="name">주차장</h1>
-  <div class="sample" id="sample"></div>
+  <p class="sample" id="sample"></p>
   <div class="layout">
-    <div class="zones" id="zones"></div>
-    <div class="log"><h2>원시 이벤트 로그</h2><table id="log"></table></div>
+    <section>
+      <h2>주차 가능 구역</h2>
+      <div class="floors" id="floors"></div>
+      <p class="caveat">앱 차량의 출차·주차·가는 중 알림만으로 만든 목록입니다. 주차장 전체의 잔여 면수가 아니며 자리를 보장하지 않습니다.</p>
+    </section>
+    <section class="log">
+      <h2>원시 이벤트 로그</h2>
+      <table id="log"></table>
+    </section>
   </div>
+</main>
 <script>
 const lot = "__LOT_ID__";
-const zoneText = id => {
-  if (id === "UNZONED") return "구역 미입력";
-  const m = /^(B?)(\d)(F?)(?:-(.+))?$/.exec(id);
-  if (!m) return id;
-  return (m[1] ? "지하 " : "") + m[2] + "층" + (m[4] ? " " + m[4] + "구역" : "");
-};
-const age = ms => ms < 60000 ? "방금" : Math.round(ms / 60000) + "분 전";
-const stateText = z => {
-  if (z.status === "JUST_LEFT") {
-    const others = z.vacancies.length - 1;
-    return age(z.vacancies[0]) + " 1대 출차" + (others > 0 ? ` 외 ${others}대` : "");
-  }
-  if (z.status === "LEAVING_SOON") return "곧 나갈 차 있음";
-  if (z.status === "FULLNESS") return "운전자 응답: " + z.fullness;
-  return "소식 없음";
-};
+const ZONE = /^(B?)(\d)(F?)(?:-(.+))?$/;
+const badge = id => { const m = ZONE.exec(id); return !m ? "?" : m[1] ? "B" + m[2] : m[2] + "F"; };
+const mark = id => { const m = ZONE.exec(id); return m && m[4] ? m[4] : ""; };
 // Upper floors first, then deeper and deeper, as a floor directory reads. Unzoned reports go last.
-const floorRank = id => {
-  const m = /^(B?)(\d)/.exec(id);
-  if (!m) return Infinity;
-  return m[1] ? Number(m[2]) : -Number(m[2]);
-};
+const floorRank = id => { const m = ZONE.exec(id); return !m ? Infinity : m[1] ? Number(m[2]) : -Number(m[2]); };
 const inFloorOrder = zones => zones.slice().sort((a, b) =>
   floorRank(a.zone_id) - floorRank(b.zone_id) || a.zone_id.localeCompare(b.zone_id));
+const age = ms => ms < 60000 ? "방금" : Math.floor(ms / 60000) + "분 전";
 const clock = ms => {
   const d = new Date(ms), two = n => String(n).padStart(2, "0");
   return `${two(d.getHours())}:${two(d.getMinutes())}:${two(d.getSeconds())}`;
+};
+const TYPE = {
+  PARK: "주차", LEAVING_SOON: "곧 출차", LEAVING_CANCEL: "출차 취소", VACATED: "출차", EXIT: "주차장 이탈",
+  CLAIM: "가는 중 알림", CLAIM_CANCEL: "가는 중 해제", FULLNESS: "혼잡 응답",
 };
 function el(tag, cls, text) {
   const node = document.createElement(tag);
@@ -71,24 +93,46 @@ function el(tag, cls, text) {
   if (text !== undefined) node.textContent = text;
   return node;
 }
+function zoneRow(z) {
+  const departures = z.vacancies.length, claims = z.claims || 0;
+  const state = departures ? (departures > claims ? "open" : "taken") : z.leaving_soon ? "soon" : "quiet";
+  const row = el("div", "zone " + state);
+  const name = el("div", "mark", mark(z.zone_id) || (z.zone_id === "UNZONED" ? "미입력" : "전체"));
+  if (mark(z.zone_id)) name.append(el("small", "", "구역"));
+  const notes = [];
+  if (departures) notes.push(age(z.vacancies[0]));
+  if (claims) notes.push(`가는 중 ${claims}대`);
+  notes.push(`주차 중 ${z.parked_app_cars}대`);
+  const count = departures ? `${departures}곳` : z.leaving_soon ? `곧 ${z.leaving_soon}곳` : "소식 없음";
+  row.append(name, el("div", "notes", notes.join(", ")), el("div", "count", count));
+  return row;
+}
 async function refresh() {
   try {
-    const board = await (await fetch(`/v1/lots/${lot}/board`)).json();
-    const log = await (await fetch(`/v1/lots/${lot}/events?limit=14`)).json();
+    const board = await (await fetch(`/v1/lots/${lot}/board`, { cache: "no-store" })).json();
+    const log = await (await fetch(`/v1/lots/${lot}/events?limit=16`, { cache: "no-store" })).json();
     document.getElementById("name").textContent = board.name || lot;
-    const capacity = board.registeredCapacity ? `등록 약 ${board.registeredCapacity.toLocaleString()}면` : "등록 면수 없음";
-    document.getElementById("sample").textContent = `앱 차량 ${board.parkedAppCars}대 / ${capacity} · 앱 차량만 관측하며 잔여 대수가 아닙니다`;
-    const zones = document.getElementById("zones");
-    zones.replaceChildren(...inFloorOrder(board.zones).map(z => {
-      const card = el("div", "zone " + z.status);
-      card.append(el("b", "", zoneText(z.zone_id)), el("div", "state", stateText(z)), el("div", "small", `앱 차량 ${z.parked_app_cars}대`));
-      return card;
+    const capacity = board.registeredCapacity ? `등록 약 ${board.registeredCapacity.toLocaleString("ko-KR")}면` : "등록 면수 없음";
+    document.getElementById("sample").textContent = `주차 중인 앱 차량 ${board.parkedAppCars}대, ${capacity}. 이 화면은 앱을 쓰는 차만 봅니다.`;
+    const floors = new Map();
+    inFloorOrder(board.zones).forEach(z => {
+      const key = badge(z.zone_id);
+      if (!floors.has(key)) floors.set(key, []);
+      floors.get(key).push(z);
+    });
+    const box = document.getElementById("floors");
+    box.replaceChildren(...[...floors].map(([key, zones]) => {
+      const floor = el("div", "floor");
+      const rows = el("div");
+      rows.append(...zones.map(zoneRow));
+      floor.append(el("div", "band", key), rows);
+      return floor;
     }));
-    if (!board.zones.length) zones.replaceChildren(el("div", "empty", "아직 이벤트가 없습니다"));
-    const table = document.getElementById("log");
-    table.replaceChildren(...log.events.slice().reverse().map(e => {
+    if (!board.zones.length) box.replaceChildren(el("div", "empty", "아직 이벤트가 없습니다. 앱 차량이 주차하거나 나가면 여기에 나타납니다."));
+    document.getElementById("log").replaceChildren(...log.events.slice().reverse().map(e => {
       const row = el("tr");
-      row.append(el("td", "", clock(e.occurred_at)), el("td", "", e.type), el("td", "", e.zone_id || "-"), el("td", "small", e.session_id.slice(0, 6)));
+      row.append(el("td", "", clock(e.occurred_at)), el("td", "type " + e.type, TYPE[e.type] || e.type),
+                 el("td", "", e.zone_id || "-"), el("td", "who", e.session_id.slice(0, 8)));
       return row;
     }));
   } catch (error) {

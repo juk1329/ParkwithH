@@ -103,6 +103,7 @@ def main() -> int:
     car.speed(0)
     car.move(FAR_LAT, FAR_LNG)
     car.wait_for(r"publish\] EXIT", timeout=15, since_ms=since)
+    time.sleep(3)  # Published is not yet delivered: the last event reaches the server before it is cleared.
 
     print("\n== no signal underground, then the power goes off")
     http(server, "/v1/admin/reset", "POST")

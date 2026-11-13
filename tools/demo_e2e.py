@@ -1,8 +1,12 @@
 #!/usr/bin/env python
-"""Runs the three live scenes on two emulators and checks what each car actually did.
+"""Runs the live scenes on two emulators and checks what each car actually did.
 
-Car A leaves a zone. Car B, with the navigation on screen and this app out of sight, hears about it
-and then confirms its own parking with one tap on a notification.
+Car A leaves a zone. Car B, with the navigation on screen and this app out of sight, stays quiet
+while far away, is told the list of zones a hundred metres from the lot, says which zone it is
+heading for, is told when that changes, and confirms its own parking with one tap on a notification.
+
+A third and fourth car exist only as events this script posts to the server: one already heading
+for another zone, one that parks in the zone B was heading for.
 
 Requires tools/emu.sh boot 1 and boot 2, and the server on port 8787. Run with --install after a build.
 """
@@ -34,8 +38,13 @@ PERMISSIONS = (
 
 LOT_ID = "06171-11291-00001-00-1"  # 탄천공영주차장, a real public lot.
 LOT_LAT, LOT_LNG = 37.51441586, 127.0662917
+# The lot's catalog radius is 150 m. This point is 230 m north of its centre: 80 m short of the edge.
+NEAR_LAT, NEAR_LNG = 37.51648200, 127.0662917
 FAR_LAT, FAR_LNG = 37.6000, 127.1500
 ZONE = "B2-B"
+AHEAD_ZONE = "B1-A"  # A car ahead, posted by this script, heads for a departure here.
+LIVE_ZONE = "B1-C"   # A departure that happens while B is already near.
+REALIGN_WAIT_SECONDS = 65
 CONFIRM_BUTTON = (1500, 258)  # The rightmost button on a three-button banner, at 2560x1440.
 MAX_VOICE_LATENCY_MS = 3000
 CLOCK_MARGIN_MS = 500
@@ -71,10 +80,15 @@ class Car:
             return False
 
     def measure_clock(self) -> None:
-        before = time.time() * 1000
-        device = int(self.shell("date", "+%s%N").strip()) / 1_000_000
-        after = time.time() * 1000
-        self.clock_offset_ms = int(device - (before + after) / 2)
+        """The quickest of several round trips: under load one can take seconds, and half of that is the error."""
+        best = None
+        for _ in range(5):
+            before = time.time() * 1000
+            device = int(self.shell("date", "+%s%N").strip()) / 1_000_000
+            after = time.time() * 1000
+            if best is None or after - before < best[0]:
+                best = (after - before, int(device - (before + after) / 2))
+        self.clock_offset_ms = best[1]
 
     def install(self) -> None:
         """A build signed differently cannot be updated in place, so it is removed first when that happens."""
@@ -95,9 +109,12 @@ class Car:
         self.probe("forget-advice")
         time.sleep(1)
         # A plain start would only bring the consent screen forward. A new process reads the consent and starts the service.
-        since = self.now_ms()
         self.shell("am", "start", "-S", "--user", "10", "-n", f"{PACKAGE}/.MainActivity")
-        if self.wait_for(r"service\] reconcile", timeout=60, since_ms=since) is None:
+        # Taken after the old process is gone: with consent already given, that process had a service
+        # of its own, and its last lines must not be read as the new one starting.
+        since = int(time.time() * 1000) + self.clock_offset_ms
+        created = self.wait_for(r"service\] created", timeout=60, since_ms=since)
+        if created is None or self.wait_for(r"service\] reconcile gear", timeout=60, since_ms=created.at_ms) is None:
             raise RuntimeError(f"{self.name}: the service did not start")
         self.probe("demo", "false")  # This run is about the real server, not the built-in stand-in.
         self.show_navigation()
@@ -221,8 +238,22 @@ def http(base: str, path: str, method: str = "GET"):
         return json.loads(response.read())
 
 
-def zone_row(board: dict) -> dict:
-    return next((zone for zone in board["zones"] if zone["zone_id"] == ZONE), {})
+def zone_row(board: dict, zone_id: str = ZONE) -> dict:
+    return next((zone for zone in board["zones"] if zone["zone_id"] == zone_id), {})
+
+
+def virtual(type_: str, zone: str, session: str, at: int) -> dict:
+    """An event from a car that exists only in this script. The reports and the video say so."""
+    return {"eventId": f"{session}-{type_}-{at}", "sessionId": session, "type": type_,
+            "lotId": LOT_ID, "zoneId": zone, "occurredAt": at}
+
+
+def post_events(base: str, events: list[dict]) -> None:
+    request = urllib.request.Request(base + "/v1/events", method="POST",
+                                     data=json.dumps({"events": events}).encode(),
+                                     headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(request, timeout=5) as response:
+        response.read()
 
 
 def isolated_residential_lot() -> tuple[str, float, float]:
@@ -291,40 +322,25 @@ def run(a: Car, b: Car, server: str, out: Path, first_round: bool = True) -> int
         report.check(advice is not None, "B hears the lot's size with no other users needed",
                      advice.text.split("text=")[-1] if advice else "")
         b.wait_for(r"voice\] finished", timeout=15, since_ms=since_b)
-    else:
-        time.sleep(61)  # Keeps the car's one-sentence-a-minute limit out of the measurement.
     report.check(b.navigation_on_top(), "B shows the navigation, not this app", b.top_activity())
     b.shot(out / "b0_on_the_way.png")
 
-    print("\n== scene 1 and 2: A pulls out, B is told")
+    print("\n== scene 1: A pulls out. B is still far away, so its list changes in silence")
     since_a, since_b = a.now_ms(), b.now_ms()
     a.gear("Drive")
     leaving = a.wait_for(r"session\] PARKED -> LEAVING", timeout=10, since_ms=since_a)
     report.check(leaving is not None, "A's gear leaving P starts the departure")
-    warned = b.wait_for(r"voice\] focus .*곧 나갈", timeout=8, since_ms=since_b)
-    if leaving and warned:
-        ms = latency(a, leaving.at_ms, b, warned.at_ms)
-        report.check(ms <= MAX_VOICE_LATENCY_MS, "B starts saying 'leaving soon' within 3 s", f"{ms} ms")
-    else:
-        report.check(False, "B says 'leaving soon'")
+    report.check(b.wait_for(r"approach\] quiet", timeout=8, since_ms=since_b) is not None,
+                 "B receives 'leaving soon' and keeps quiet, being far from the lot")
+    row = zone_row(http(server, f"/v1/lots/{LOT_ID}/board"))
+    report.check(row.get("leaving_soon") == 1 and row.get("vacancies") == [],
+                 "board shows one car about to leave, not yet a departure", json.dumps(row, ensure_ascii=False)[:120])
     a.speed(20)
     vacated = a.wait_for(r"session\] LEAVING -> VACATED", timeout=10, since_ms=since_a)
     report.check(vacated is not None, "A's movement confirms the departure")
-    posted = b.wait_for(r"notify\] post id=2 title=.*방금 1대", timeout=8, since_ms=since_b)
-    spoken = b.wait_for(r"voice\] focus .*방금 1대", timeout=8, since_ms=since_b)
-    if vacated and posted:
-        ms = latency(a, vacated.at_ms, b, posted.at_ms)
-        report.check(ms <= MAX_VOICE_LATENCY_MS, "B's banner appears within 3 s of the departure", f"{ms} ms")
-    else:
-        report.check(False, "B shows the departure banner")
-    if vacated and spoken:
-        ms = latency(a, vacated.at_ms, b, spoken.at_ms)
-        LATENCIES.append(ms)
-        report.check(ms <= MAX_VOICE_LATENCY_MS, "B starts saying the departure within 3 s", f"{ms} ms")
-    else:
-        report.check(False, "B says the departure")
-    time.sleep(1)
-    b.shot(out / "b1_departure_banner.png")
+    time.sleep(3)
+    spoke = [e.text for e in b.log(since_b) if re.search(r"voice\] focus .*(곧 나갈|방금 1대)", e.text)]
+    report.check(not spoke, "B said nothing about single departures while far away", str(spoke)[:120])
     report.check(b.navigation_on_top(), "B still shows the navigation", b.top_activity())
     row = zone_row(http(server, f"/v1/lots/{LOT_ID}/board"))
     report.check(row.get("status") == "JUST_LEFT" and len(row.get("vacancies", [])) == 1,
@@ -338,7 +354,78 @@ def run(a: Car, b: Car, server: str, out: Path, first_round: bool = True) -> int
     exit_alert = a.wait_for(r"proximity\] transition EXIT", timeout=6, since_ms=since_a)
     print(f"  note  proximity EXIT callback: {'received' if exit_alert else 'not received, position rule ended the session'}")
 
-    print("\n== scene 3: B arrives and confirms with one tap")
+    print("\n== a car ahead (posted to the server by this script, not an emulator) heads for another departure")
+    now = int(time.time() * 1000)
+    post_events(server, [
+        virtual("VACATED", AHEAD_ZONE, "virtual-left-1", now - 90_000),
+        virtual("CLAIM", AHEAD_ZONE, "virtual-ahead", now - 20_000),
+    ])
+    row = zone_row(http(server, f"/v1/lots/{LOT_ID}/board"), AHEAD_ZONE)
+    report.check(len(row.get("vacancies", [])) == 1 and row.get("claims") == 1,
+                 "board shows the other departure with one car heading for it", json.dumps(row, ensure_ascii=False)[:120])
+
+    print("\n== scene 2: B comes within 100 m of the lot and is told the list")
+    since_b = b.now_ms()
+    b.move(NEAR_LAT, NEAR_LNG)
+    near = b.wait_for(r"approach\] near", timeout=10, since_ms=since_b)
+    report.check(near is not None, "B notices it is 100 m from the lot's edge")
+    told = b.wait_for(r"voice\] focus .*주차 가능 구역이에요", timeout=8, since_ms=since_b)
+    if near and told:
+        ms = told.at_ms - near.at_ms
+        LATENCIES.append(ms)
+        report.check(ms <= MAX_VOICE_LATENCY_MS, "B starts telling the list within 3 s of arriving near", f"{ms} ms")
+        spoken = told.text.split("text=")[-1]
+        report.check("지하 2층 B구역 1곳" in spoken and "지하 1층 A구역은 앞차가 가는 중" in spoken,
+                     "the list names A's zone as open and the other as taken by the car ahead", spoken)
+    else:
+        report.check(False, "B tells the list")
+    banner = b.wait_for(r"notify\] post id=6 title=주차 가능 구역", timeout=5, since_ms=since_b)
+    report.check(banner is not None, "B shows the list as a banner", banner.text.split("title=")[-1] if banner else "")
+    claim = b.wait_for(rf"publish\] CLAIM lot={LOT_ID} zone={ZONE}", timeout=5, since_ms=since_b)
+    report.check(claim is not None, "B says it is heading for the zone nobody else is, without being asked")
+    report.check(b.wait_for(r"voice\] focus .*지하 2층 B구역으로 간다고 알렸어요", timeout=20, since_ms=since_b) is not None,
+                 "B tells its driver what it said, and that another zone can be named")
+    time.sleep(1.5)
+    b.shot(out / "b1_list_banner.png")
+    report.check(b.navigation_on_top(), "B still shows the navigation", b.top_activity())
+    row = zone_row(http(server, f"/v1/lots/{LOT_ID}/board"))
+    report.check(row.get("claims") == 1 and len(row.get("vacancies", [])) == 1,
+                 "the server shows B heading for that departure, for the cars behind it",
+                 json.dumps(row, ensure_ascii=False)[:120])
+    buttons = [line for line in b.shell("dumpsys", "notification", "--noredact").splitlines()
+               if f"pkg={PACKAGE} " in line and " id=6 " in line and "actions=" in line and "actions=0" not in line]
+    report.check(not buttons, "the list banner has no buttons while driving")
+
+    print("\n== scene 3: while B looks for the space, changes are told as they happen")
+    # The microphone is open for the driver to name another zone. Nothing else is said until it closes.
+    b.wait_for(r"stt\] (silence timeout|cancelled|error|text=)", timeout=45, since_ms=since_b)
+    time.sleep(1)
+    since_b = b.now_ms()
+    sent_at = int(time.time() * 1000)
+    post_events(server, [virtual("VACATED", LIVE_ZONE, "virtual-left-2", sent_at)])
+    live = b.wait_for(r"voice\] focus .*지하 1층 C구역에서 방금 1대", timeout=8, since_ms=since_b)
+    if live:
+        ms = (live.at_ms - b.clock_offset_ms) - sent_at
+        LATENCIES.append(ms)
+        report.check(ms <= MAX_VOICE_LATENCY_MS, "near the lot, B says a new departure within 3 s", f"{ms} ms")
+    else:
+        report.check(False, "near the lot, B says a new departure")
+    b.wait_for(r"voice\] finished", timeout=15, since_ms=since_b)
+
+    since_b = b.now_ms()
+    post_events(server, [virtual("PARK", ZONE, "virtual-parker", int(time.time() * 1000))])
+    taken = b.wait_for(r"voice\] focus .*가시려던 지하 2층 B구역에 다른 차가 먼저 주차했어요", timeout=10, since_ms=since_b)
+    report.check(taken is not None, "B is told another car parked in the zone it was heading for",
+                 taken.text.split("text=")[-1] if taken else "")
+    moved = b.wait_for(rf"publish\] CLAIM lot={LOT_ID} zone={LIVE_ZONE}", timeout=5, since_ms=since_b)
+    report.check(moved is not None, "B moves on to the next zone nobody is heading for")
+    time.sleep(2)
+    board = http(server, f"/v1/lots/{LOT_ID}/board")
+    report.check(zone_row(board).get("claims") == 0 and zone_row(board, LIVE_ZONE).get("claims") == 1,
+                 "the server moved B's heading with it",
+                 f"{ZONE}={zone_row(board).get('claims')} {LIVE_ZONE}={zone_row(board, LIVE_ZONE).get('claims')}")
+
+    print("\n== scene 4: B parks and confirms with one tap")
     time.sleep(11)
     gone = f"pkg={PACKAGE} " not in "\n".join(
         line for line in b.shell("dumpsys", "notification", "--noredact").splitlines() if " id=2 " in line)
@@ -350,24 +437,27 @@ def run(a: Car, b: Car, server: str, out: Path, first_round: bool = True) -> int
     b.gear("Reverse")
     time.sleep(2)
     b.gear("Park")
-    prompt = b.wait_for(rf"notify\] post id=3 title=지하 2층 B구역에 내 차 위치 저장", timeout=25, since_ms=since_b)
-    report.check(prompt is not None, "B is offered the zone it was just told about")
+    prompt = b.wait_for(r"notify\] post id=3 title=지하 1층 C구역에 내 차 위치 저장", timeout=25, since_ms=since_b)
+    report.check(prompt is not None, "B is offered the zone it said it was heading for")
     time.sleep(1.5)
     b.shot(out / "b2_park_prompt.png")
     since_tap = b.now_ms()
     b.tap(*CONFIRM_BUTTON)
     report.check(b.wait_for(r"start action=app\.parkrelay\.CONFIRM_ZONE", timeout=6, since_ms=since_tap) is not None,
                  "the tap reaches the service")
-    report.check(b.wait_for(rf"publish\] PARK lot={LOT_ID} zone={ZONE}", timeout=8, since_ms=since_tap) is not None,
-                 "B publishes its parking")
+    parked = b.wait_for(rf"publish\] PARK lot={LOT_ID} zone={LIVE_ZONE}", timeout=8, since_ms=since_tap)
+    report.check(parked is not None, "B publishes its parking")
+    released = b.wait_for(rf"publish\] CLAIM_CANCEL lot={LOT_ID}", timeout=3, since_ms=since_tap)
+    report.check(released is not None and parked is not None and released.at_ms <= parked.at_ms,
+                 "B stops saying it is on its way, and does so before reporting the parking")
     time.sleep(2)
     b.shot(out / "b3_after_tap.png")
     report.check(b.navigation_on_top(), "the app never opened", b.top_activity())
     board = http(server, f"/v1/lots/{LOT_ID}/board")
-    row = zone_row(board)
-    report.check(row.get("vacancies") == [] and board["parkedAppCars"] == 1,
-                 "B's parking used up the departure and counts as one car",
-                 f"vacancies={row.get('vacancies')} parkedAppCars={board['parkedAppCars']}")
+    row = zone_row(board, LIVE_ZONE)
+    report.check(row.get("vacancies") == [] and row.get("claims") == 0 and board["parkedAppCars"] == 2,
+                 "B's parking used up the departure, and two app cars are counted (B and the scripted one)",
+                 f"vacancies={row.get('vacancies')} claims={row.get('claims')} parkedAppCars={board['parkedAppCars']}")
 
     print("\n== nothing false gets out")
     since_a = a.now_ms()
@@ -383,6 +473,31 @@ def run(a: Car, b: Car, server: str, out: Path, first_round: bool = True) -> int
     buttons = [line for line in a.shell("dumpsys", "notification", "--noredact").splitlines()
                if f"pkg={PACKAGE} " in line and " id=3 " in line]
     report.check(not buttons, "the question with buttons is gone once the car is moving")
+
+    print("\n== a car that pulls out a little and goes back in, however slowly, opens no space")
+    since_a = a.now_ms()
+    a.gear("Reverse")
+    time.sleep(2)
+    a.gear("Park")
+    a.wait_for(r"notify\] post id=3", timeout=25, since_ms=since_a)
+    a.probe("zone", ZONE)
+    report.check(a.wait_for(rf"publish\] PARK lot={LOT_ID} zone={ZONE}", timeout=10, since_ms=since_a) is not None,
+                 "A parks again")
+    since_a = a.now_ms()
+    a.gear("Reverse")
+    a.speed(3)
+    time.sleep(3)
+    a.speed(0)
+    time.sleep(REALIGN_WAIT_SECONDS)  # Longer than the one-minute window a car without a speed signal gets.
+    a.gear("Park")
+    cancelled = a.wait_for(rf"publish\] LEAVING_CANCEL lot={LOT_ID}", timeout=10, since_ms=since_a)
+    vacated = [e.text for e in a.log(since_a) if "publish] VACATED" in e.text]
+    report.check(cancelled is not None and not vacated, "the late return cancels the departure instead of reporting one",
+                 str(vacated)[:120])
+    time.sleep(2)
+    row = zone_row(http(server, f"/v1/lots/{LOT_ID}/board"))
+    report.check(row.get("vacancies") == [] and row.get("leaving_soon") == 0,
+                 "the board never showed that zone as open", json.dumps(row, ensure_ascii=False)[:120])
     a.leave_any_session()
 
     name, lat, lng = isolated_residential_lot()
@@ -414,7 +529,10 @@ def main() -> int:
     for car in (a, b):
         if args.install:
             car.install()
+        car.measure_clock()
         car.prepare()
+    # A route left by an earlier run would steer either car's parking and be announced during setup.
+    a.forget_route()
     b.forget_route()
     if args.minutes:
         try:

@@ -30,7 +30,7 @@ class NaviSource(
         }
 
         override fun onRouteStarted(routeStartInfo: RouteStartInfo) {
-            Trace.log("navi", "route started $routeStartInfo")
+            Trace.log("navi", "route started ${Trace.detail(routeStartInfo)}")
             Trace.guarded("navi destination") { helper?.getDestinationInfo() }
         }
 
@@ -40,7 +40,7 @@ class NaviSource(
         }
 
         override fun onRouteStateInfo(routeStateInfo: RouteStateInfo) {
-            Trace.log("navi", "route state $routeStateInfo")
+            Trace.log("navi", "route state ${Trace.detail(routeStateInfo)}")
         }
 
         override fun onError(errorCode: NaviErrorCode) {
@@ -48,7 +48,7 @@ class NaviSource(
         }
 
         override fun onDestinationInfo(destinationInfo: DestinationInfo) {
-            Trace.log("navi", "destination $destinationInfo")
+            Trace.log("navi", "destination ${Trace.detail(destinationInfo)}")
             // With no route set, the navigation reports an empty destination at 0, 0.
             val none = destinationInfo.latitude == 0.0 && destinationInfo.longitude == 0.0
             onDestination(
@@ -63,7 +63,7 @@ class NaviSource(
         }
 
         override fun onDestinationArrived(destinationArrivedInfo: DestinationArrivedInfo) {
-            Trace.log("navi", "arrived $destinationArrivedInfo")
+            Trace.log("navi", "arrived ${Trace.detail(destinationArrivedInfo)}")
             onArrived()
         }
     }
@@ -100,7 +100,7 @@ class NaviSource(
                     address = "",
                 ),
             )
-            Trace.log("navi", "route requested to $name")
+            Trace.log("navi", "route requested to ${Trace.detail(name)}")
         }
     }
 

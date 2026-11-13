@@ -45,7 +45,7 @@ class LocationFeed(
             val place = location.latitude to location.longitude
             if (place != lastLogged) {
                 lastLogged = place
-                Trace.log("location", "fused lat=${location.latitude} lng=${location.longitude}")
+                Trace.log("location", "fused ${Trace.detail("lat=${location.latitude} lng=${location.longitude}")}")
             }
             onFix(Fix(location.latitude, location.longitude, System.currentTimeMillis()))
         }
@@ -54,7 +54,7 @@ class LocationFeed(
     }
 
     private val androidListener = LocationListener { location: Location ->
-        Trace.log("location", "android lat=${location.latitude} lng=${location.longitude}")
+        Trace.log("location", "android ${Trace.detail("lat=${location.latitude} lng=${location.longitude}")}")
         onFix(Fix(location.latitude, location.longitude, System.currentTimeMillis()))
     }
 

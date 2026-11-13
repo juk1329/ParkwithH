@@ -17,7 +17,11 @@ enum class Gear {
 
 enum class Phase { DRIVING, P_TENTATIVE, PARKED, LEAVING, VACATED }
 
-enum class EventType { PARK, LEAVING_SOON, LEAVING_CANCEL, VACATED, EXIT }
+/**
+ * CLAIM and CLAIM_CANCEL come from a car approaching a lot, not from a parking session: "I am heading
+ * to this zone", so the cars behind it are pointed elsewhere.
+ */
+enum class EventType { PARK, LEAVING_SOON, LEAVING_CANCEL, VACATED, EXIT, CLAIM, CLAIM_CANCEL }
 
 /** What proved the car left its space, so the board can judge how far to trust a signal. */
 enum class Evidence { SPEED, GEAR_TIME, LEFT_LOT, RECOVERED }
@@ -327,7 +331,10 @@ class SessionReducer(
 
     private fun returnToPark(state: SessionState, at: Long): Step {
         val departed = state.departedAt ?: at
-        val realigning = state.movedMeters < config.movedThresholdMeters && at - departed <= config.cancelWindowMillis
+        // With a speed signal the distance is the proof: a car that never moved a car's length has not
+        // left, however long it idled. Without one, only a quick return counts as realigning.
+        val barelyMoved = state.movedMeters < config.movedThresholdMeters
+        val realigning = barelyMoved && (state.speedSeen || at - departed <= config.cancelWindowMillis)
         if (!realigning) return Step(state)
         val parked = state.copy(phase = Phase.PARKED, departedAt = null, movedMeters = 0.0)
         return Step(parked, publishIfShared(parked, EventType.LEAVING_CANCEL, at))

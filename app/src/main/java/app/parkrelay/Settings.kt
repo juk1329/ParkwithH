@@ -15,6 +15,11 @@ class Settings(context: Context) {
         get() = prefs.getBoolean("voice_questions", true)
         set(value) = prefs.edit().putBoolean("voice_questions", value).apply()
 
+    /** Tell cars behind which zone this car is heading for. On by default once consent is given. */
+    var shareHeading: Boolean
+        get() = prefs.getBoolean("share_heading", true)
+        set(value) = prefs.edit().putBoolean("share_heading", value).apply()
+
     var serverUrl: String
         get() = prefs.getString("server_url", DEFAULT_SERVER_URL) ?: DEFAULT_SERVER_URL
         set(value) = prefs.edit().putString("server_url", value).apply()
@@ -62,7 +67,10 @@ class Settings(context: Context) {
 
     fun carLocation(): JSONObject? = prefs.getString("car_location", null)?.let(::JSONObject)
 
-    fun clearAll() = prefs.edit().clear().apply()
+    /** Synchronous on purpose: a service starting right after must already see consent gone. */
+    fun clearAll() {
+        prefs.edit().clear().commit()
+    }
 
     companion object {
         // The emulator reaches the machine it runs on at this address.

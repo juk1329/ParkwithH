@@ -55,7 +55,7 @@ class ZoneParserTest {
         for (speech in listOf("네", "네 맞아요", "응", "맞아", "그래", "저장해줘")) {
             assertEquals(SpokenAnswer.Yes, ZoneParser.parse(speech), speech)
         }
-        for (speech in listOf("아니", "아니요 다른 데요", "됐어", "안 해")) {
+        for (speech in listOf("아니", "아니요 다른 데요", "됐어", "안 해", "취소", "취소해 줘")) {
             assertEquals(SpokenAnswer.No, ZoneParser.parse(speech), speech)
         }
     }

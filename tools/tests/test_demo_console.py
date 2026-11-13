@@ -29,6 +29,11 @@ class FakeConsole:
         self.cars = {"A": FakeCar(), "B": FakeCar()}
         self.lock = threading.Lock()
         self.note = ""
+        self.virtual_calls = []
+
+    def virtual(self, what):
+        self.virtual_calls.append(what)
+        return what
 
 
 @pytest.fixture
@@ -55,8 +60,38 @@ def test_a_fixed_button_reaches_the_car(console):
     fake, port = console
     assert post(port, "/api/car/B/gear/R", {"Host": f"127.0.0.1:{port}", "X-Demo-Console": "1"}) == 200
     assert post(port, "/api/car/A/place/lot", {"Host": f"localhost:{port}", "X-Demo-Console": "1"}) == 200
-    assert fake.cars["B"].calls == [("gear", "R")]
+    assert post(port, "/api/car/B/place/near", {"Host": f"127.0.0.1:{port}", "X-Demo-Console": "1"}) == 200
+    assert fake.cars["B"].calls == [("gear", "R"), ("move", "near")]
     assert fake.cars["A"].calls == [("move", "lot")]
+
+
+def test_a_virtual_car_is_one_of_the_fixed_choices(console):
+    fake, port = console
+    headers = {"Host": f"127.0.0.1:{port}", "X-Demo-Console": "1"}
+    assert post(port, "/api/virtual/seed", headers) == 200
+    assert post(port, "/api/virtual/take", headers) == 200
+    assert fake.virtual_calls == ["seed", "take"]
+
+
+def test_virtual_events_are_fixed_and_pass_the_servers_own_checks():
+    from server.app import EventIn
+
+    for events, note in dc.VIRTUAL.values():
+        assert note.startswith("가상 차량")
+        for type_, zone, session, ago in events:
+            assert session.startswith("virtual-")
+            EventIn(eventId="e", sessionId=session, type=type_, lotId=dc.LOT_ID, zoneId=zone, occurredAt=1 + ago)
+
+
+def test_every_scene_has_a_button_and_the_near_point_is_inside_a_hundred_metres_of_the_edge():
+    import math
+
+    assert len(dc.SCENES) == 6
+    assert all({"car", "title", "button", "screen", "done"} <= set(scene) for scene in dc.SCENES)
+    (lat, lng), (near_lat, near_lng) = dc.PLACES["lot"], dc.PLACES["near"]
+    metres = math.hypot((near_lat - lat) * 111_320, (near_lng - lng) * 111_320 * math.cos(math.radians(lat)))
+    coex_radius = 300  # From the catalog row of this lot.
+    assert 0 < metres - coex_radius <= 100
 
 
 @pytest.mark.parametrize("headers", [
@@ -75,10 +110,13 @@ def test_requests_from_elsewhere_are_refused(console, headers):
     "/api/car/A/gear/X",
     "/api/car/A/place/37.5,127.0",
     "/api/car/A/gear/P;reboot",
-    "/api/scene/6",
+    "/api/scene/7",
+    "/api/virtual/anything",
+    "/api/car/A/place/gate",
     "/api/scene/1/../reset",
 ])
 def test_only_fixed_choices_match(console, path):
     fake, port = console
     assert post(port, path, {"Host": f"127.0.0.1:{port}", "X-Demo-Console": "1"}) == 404
     assert fake.cars["A"].calls == [] and fake.cars["B"].calls == []
+    assert fake.virtual_calls == []

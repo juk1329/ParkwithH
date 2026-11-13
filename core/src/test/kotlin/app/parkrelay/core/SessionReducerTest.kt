@@ -360,6 +360,48 @@ class SessionReducerTest {
     }
 
     @Test
+    fun `a late return to park after a small move still cancels`() {
+        // Pulled out a little, idled for minutes, went back in: the space never opened.
+        val h = harness().parkInto(publicLot).feed(
+            Input.GearChanged(Gear.REVERSE, 100_000),
+            Input.Speed(1f, 100_500),
+            Input.Speed(0f, 103_500),
+            Input.Tick(160_000),
+            Input.GearChanged(Gear.PARK, 400_000),
+        )
+        assertEquals(Phase.PARKED, h.state.phase)
+        assertEquals(EventType.LEAVING_CANCEL, h.published.last().type)
+        assertFalse(EventType.VACATED in h.types())
+    }
+
+    @Test
+    fun `without a speed signal a slow return is already a departure`() {
+        val h = harness().parkInto(publicLot).feed(
+            Input.GearChanged(Gear.DRIVE, 100_000),
+            Input.Tick(160_000),
+            Input.GearChanged(Gear.PARK, 400_000),
+        )
+        assertTrue(EventType.VACATED in h.types())
+        assertFalse(EventType.LEAVING_CANCEL in h.types())
+    }
+
+    @Test
+    fun `switching sharing off while parked silences that very parking`() {
+        val h = harness().parkInto(publicLot)
+        assertEquals(listOf(EventType.PARK), h.types())
+        h.feed(
+            Input.ShareAnswered(false, 50_000),
+            Input.GearChanged(Gear.DRIVE, 100_000),
+            Input.Speed(5f, 100_500),
+            Input.Speed(5f, 104_500),
+            Input.LeftLot(120_000),
+        )
+        // The departure happened, and none of it was sent.
+        assertEquals(Phase.DRIVING, h.state.phase)
+        assertEquals(listOf(EventType.PARK), h.types())
+    }
+
+    @Test
     fun `a huge gap in speed samples cannot invent a departure`() {
         val h = harness().parkInto(publicLot).feed(
             Input.GearChanged(Gear.DRIVE, 100_000),

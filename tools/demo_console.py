@@ -1,5 +1,6 @@
 #!/usr/bin/env python
-"""The two-car demo on one page: car A leaves a zone, car B hears it and parks with one tap.
+"""The two-car demo on one page: car A leaves a zone, and car B, a hundred metres from the lot, is
+told the list of zones, says where it is heading, and parks with one tap.
 
     python tools/demo_console.py             # with two Pleos emulators already running
     python tools/demo_console.py --install   # also installs apk/*_release.apk on both
@@ -12,6 +13,10 @@ typed while the scene runs. Works on Windows, macOS and Linux. Needs adb and the
 Car A is the emulator with the lower port (usually emulator-5554) and its Virtual Console is
 forwarded to 8088. Car B is the other one, on 8089. Everything listens on 127.0.0.1 only, and a
 request can only pick among fixed choices: nothing it sends reaches a command line.
+
+Two emulators cannot fill a list, so the console can also post the events of cars that do not
+exist ("virtual cars"): a departure on another floor, a car ahead heading for it, a car that parks
+where car B was going. The page labels them as such, and their content is fixed in this file.
 """
 from __future__ import annotations
 
@@ -55,8 +60,15 @@ CONSOLE_PORTS = (8088, 8089)
 LOT_ID = "59446-29391-00005-00-1"  # 코엑스 주차장, where the app's route button heads.
 PLACES = {
     "lot": (37.512432, 127.058847),  # The lot's catalog point.
+    # The catalog gives this lot a radius of 300 m. This point is 380 m south of its centre, so 80 m
+    # short of its edge: inside the hundred metres at which the app tells the list.
+    "near": (37.509018, 127.058847),
     "away": (37.6000, 127.1500),  # Kilometres from any lot in the catalog.
 }
+PLACE_NAMES = {"lot": "코엑스 주차장 안", "near": "주차장 100m 앞", "away": "주차장 밖"}
+MINUTE_MS = 60_000
+DEPARTURE_PAUSE_SECONDS = 5  # Long enough to see "곧 1곳" on the dashboard before it becomes "1곳".
+API_VERSION = 2
 GEARS = {"P": "Park", "R": "Reverse", "N": "Neutral", "D": "Drive"}
 SETTLE_SECONDS = 2  # The app counts a P right after R as parking, and wants the R seen first.
 WAIT_FOR_CARS_SECONDS = 600
@@ -158,13 +170,31 @@ class Console:
             b.gear("D")
             b.shell("am", "start", "--user", DRIVER_USER, "-n", NAVIGATION)
         elif number == 3:
+            # The gear leaving P is "about to leave". Leaving the lot confirms it: the Virtual Console
+            # page has no accelerator, and the app wants 15 m of movement or the car out of the lot.
             a.gear("D")
-        elif number == 4:
+            time.sleep(DEPARTURE_PAUSE_SECONDS)
             a.move("away")
+        elif number == 4:
+            self.virtual("seed")
         elif number == 5:
+            b.gear("D")
+            b.move("near")
+        elif number == 6:
             self.park(b)
         self.last_scene = number
         return SCENES[number - 1]["done"]
+
+    def virtual(self, what: str) -> str:
+        """Posts what cars that are not emulators would have sent. Every field is fixed here."""
+        now = int(time.time() * 1000)
+        events, note = VIRTUAL[what]
+        post_json(f"{SERVER}/v1/events", {"events": [
+            {"eventId": f"{session}-{type_}-{now}", "sessionId": session, "type": type_, "lotId": LOT_ID,
+             "zoneId": zone, "occurredAt": now - ago}
+            for type_, zone, session, ago in events
+        ]})
+        return note
 
     def reset(self) -> str:
         """Both cars drive away from the lot and stop there, then the server forgets the last run."""
@@ -196,6 +226,18 @@ class Console:
                 "busy": self.lock.locked(), "dashboard": f"{SERVER}/v1/lots/{LOT_ID}/dashboard"}
 
 
+# Cars that exist only as events: (type, zone, session, how long ago in ms).
+VIRTUAL = {
+    "seed": ([
+        ("VACATED", "B1-A", "virtual-left-b1", 2 * MINUTE_MS),
+        ("VACATED", "B3-C", "virtual-left-b3", 4 * MINUTE_MS),
+        ("CLAIM", "B1-A", "virtual-ahead", 20_000),
+    ], "가상 차량: 지하 1층 A구역과 지하 3층 C구역에서 1대씩 나갔고, 앞차 1대가 지하 1층 A구역으로 가는 중입니다."),
+    "take": ([
+        ("PARK", "B2-B", "virtual-parker", 0),
+    ], "가상 차량: 다른 차가 지하 2층 B구역에 먼저 주차했습니다. B차가 그 구역으로 가던 중이면 다른 구역을 안내받습니다."),
+}
+
 # The page shows these in order. "screen" is what to do on the emulator, "done" what should follow.
 SCENES = [
     {"car": "A", "title": "A차가 코엑스 주차장에 주차해요",
@@ -208,19 +250,26 @@ SCENES = [
      "screen": "처음 한 번은 먼저 B차 화면의 ParkwithH에서 [1. 코엑스로 안내 시작]을 누르고 이 버튼을 누르세요. "
                "\"코엑스 주차장, 약 2,100면 규모예요\"가 들립니다. 안내는 목적지마다 한 번만 나오고, 경로는 다시 할 때도 남아 있습니다.",
      "done": "B차가 D로 바뀌고 내비 화면으로 돌아갔습니다."},
-    {"car": "A", "title": "A차가 출차를 시작해요",
-     "button": "A차 기어 D",
-     "screen": "B차는 앱을 열지 않아도 \"지하 2층 B구역에서 곧 나갈 차가 있어요\"를 음성과 배너로 받습니다.",
-     "done": "A차 기어가 P에서 D로 바뀌었습니다."},
-    {"car": "A", "title": "A차가 주차장을 빠져나가요",
-     "button": "A차 위치를 주차장 밖으로",
-     "screen": "B차에 \"지하 2층 B구역에서 방금 1대 나갔어요\"가 옵니다. 앱은 오탐을 막으려고 15m 이상 움직이거나 "
-               "주차장을 벗어나야 출차로 확정하는데, Virtual Console에는 주행 장치가 없어 위치를 옮깁니다.",
-     "done": "A차 위치를 주차장 밖으로 옮겼습니다."},
-    {"car": "B", "title": "B차가 도착해 같은 구역에 주차해요",
+    {"car": "A", "title": "A차가 나가요",
+     "button": "A차 출차 (기어 D → 주차장 밖)",
+     "screen": "A차 기어가 P를 벗어나면 아래 목록에 \"지하 2층 B구역 곧 1곳\"이, 몇 초 뒤 주차장을 벗어나면 \"1곳\"이 됩니다. "
+               "B차는 아직 멀리 있어서 아무 말도 하지 않습니다. 목록만 조용히 바뀝니다.",
+     "done": "A차가 기어를 D로 바꾸고 주차장을 벗어났습니다. 목록에 지하 2층 B구역 1곳이 생겼습니다."},
+    {"car": "가상", "title": "다른 차들도 움직여요 (가상 차량)",
+     "button": "가상 차량 넣기",
+     "screen": "에뮬레이터 2대로는 목록을 채울 수 없어, 콘솔이 다른 차들의 이벤트를 서버에 대신 보냅니다. "
+               "지하 1층 A구역과 지하 3층 C구역에서 1대씩 나갔고, B차보다 앞선 차 1대가 지하 1층 A구역으로 간다고 알렸습니다.",
+     "done": VIRTUAL["seed"][1]},
+    {"car": "B", "title": "B차가 주차장 100m 앞에 와요",
+     "button": "B차 위치를 100m 앞으로",
+     "screen": "앱을 열지 않은 B차가 층별 주차 가능 구역을 음성과 배너로 받습니다. 앞차가 가는 지하 1층 A구역은 건너뛰고 "
+               "\"지하 2층 B구역으로 간다고 알렸어요\"라고 말한 뒤, 목록에 \"가는 중 1대\"가 붙습니다. "
+               "마이크가 있으면 이때 다른 구역 이름이나 \"취소\"를 말해 바꿀 수 있습니다.",
+     "done": "B차 위치를 주차장 경계 80m 앞으로 옮겼습니다. B차 화면의 배너와 음성을 확인하세요."},
+    {"car": "B", "title": "B차가 주차해요",
      "button": "B차 주차 (후진 → P)",
      "screen": "B차 화면 위 \"지하 2층 B구역에 내 차 위치 저장\"에서 [맞아요]를 누르세요. 앱을 열지 않고 저장되고, "
-               "대시보드의 출차 소식 1건이 B차 주차로 소모됩니다.",
+               "목록에서 지하 2층 B구역 1곳과 \"가는 중\"이 함께 사라집니다.",
      "done": "B차가 코엑스 주차장 안에서 R → P로 바뀌었습니다. B차 화면의 배너에서 [맞아요]를 누르세요."},
 ]
 
@@ -236,6 +285,21 @@ def post(url: str) -> None:
         pass
 
 
+def post_json(url: str, payload: dict) -> None:
+    request = urllib.request.Request(url, method="POST", data=json.dumps(payload).encode("utf-8"),
+                                     headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(request, timeout=10):
+        pass
+
+
+def server_is_current() -> bool:
+    """A server left running from an older checkout answers the board but knows nothing of the list."""
+    try:
+        return get_json(f"{SERVER}/v1/health").get("api", 0) >= API_VERSION
+    except (OSError, ValueError):
+        return False
+
+
 def server_alive() -> bool:
     try:
         get_json(f"{SERVER}/v1/lots/{LOT_ID}/board")
@@ -247,6 +311,8 @@ def server_alive() -> bool:
 def start_server() -> subprocess.Popen | None:
     """Starts the server unless one already answers. Returns the process this script owns, if any."""
     if server_alive():
+        if not server_is_current():
+            sys.exit("8787 포트에 예전 버전의 서버가 실행 중입니다. 그 서버를 끄고 다시 실행하세요.")
         print("서버: 이미 8787에서 실행 중입니다.")
         return None
     missing = [name for name in ("fastapi", "uvicorn") if importlib.util.find_spec(name) is None]
@@ -342,9 +408,10 @@ def keep_consoles_awake(cars: list[Car]) -> None:
 ROUTES = [
     (re.compile(r"^/api/car/([AB])/gear/([PRND])$"), lambda c, m: c.cars[m[1]].gear(m[2]) or
      f"차량 {m[1]} 기어를 {m[2]}로 바꿨습니다."),
-    (re.compile(r"^/api/car/([AB])/place/(lot|away)$"), lambda c, m: c.cars[m[1]].move(m[2]) or
-     f"차량 {m[1]} 위치를 {'코엑스 주차장 안' if m[2] == 'lot' else '주차장 밖'}으로 옮겼습니다."),
-    (re.compile(r"^/api/scene/([1-5])$"), lambda c, m: c.scene(int(m[1]))),
+    (re.compile(r"^/api/car/([AB])/place/(lot|near|away)$"), lambda c, m: c.cars[m[1]].move(m[2]) or
+     f"차량 {m[1]} 위치를 {PLACE_NAMES[m[2]]}으로 옮겼습니다."),
+    (re.compile(r"^/api/scene/([1-6])$"), lambda c, m: c.scene(int(m[1]))),
+    (re.compile(r"^/api/virtual/(seed|take)$"), lambda c, m: c.virtual(m[1])),
     (re.compile(r"^/api/reset$"), lambda c, m: c.reset()),
 ]
 
@@ -460,59 +527,72 @@ PAGE = r"""<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ParkwithH 시연 콘솔</title>
 <style>
+  /* Shares its look with the app and the dashboard: the floor on a sign-blue band, the zone as one
+     large letter, the count beside it. Colour carries meaning only. */
   :root {
-    --bg:#f5f6f8; --panel:#ffffff; --text:#14181f; --muted:#5d6675; --line:#dfe3e8;
-    --accent:#2457d6; --accent-text:#ffffff; --good:#17804a; --warn:#a86400; --bad:#b42318; --chip:#eef1f5;
+    --bg:#eef1f4; --panel:#ffffff; --text:#10161c; --muted:#4e5965; --line:#d0d6dd; --chip:#e4e8ed;
+    --band:#0f4cbd; --band-text:#ffffff; --open:#067a43; --soon:#a35c00; --taken:#707a85; --bad:#b42318;
   }
   @media (prefers-color-scheme: dark) {
     :root {
-      --bg:#12161c; --panel:#1c222b; --text:#eef1f5; --muted:#9aa4b2; --line:#2c343f;
-      --accent:#6d9bff; --accent-text:#0b1220; --good:#78dcaa; --warn:#f2c14e; --bad:#ff8a80; --chip:#262d37;
+      --bg:#0d1116; --panel:#181e26; --text:#f4f6f8; --muted:#a5b0bc; --line:#303944; --chip:#232b35;
+      --band:#185cd6; --band-text:#ffffff; --open:#4ade80; --soon:#ffb840; --taken:#848f9b; --bad:#ff8a80;
     }
   }
   * { box-sizing:border-box; }
-  body { margin:0; background:var(--bg); color:var(--text); font:16px/1.5 system-ui, "Noto Sans KR", sans-serif;
-         padding:20px 16px 40px; word-break:keep-all; }
-  main { max-width:1280px; margin:0 auto; }
-  h1 { font-size:26px; margin:0; }
-  .sub { color:var(--muted); margin:4px 0 18px; }
+  body { margin:0; background:var(--bg); color:var(--text); padding:22px 16px 44px; word-break:keep-all;
+         font:16px/1.5 "Pretendard", "Noto Sans KR", "Apple SD Gothic Neo", system-ui, sans-serif; }
+  main { max-width:1320px; margin:0 auto; }
+  h1 { font-size:28px; line-height:1.2; margin:0; letter-spacing:-0.01em; }
+  .sub { color:var(--muted); margin:6px 0 18px; max-width:76ch; }
   .layout { display:grid; grid-template-columns:minmax(0,3fr) minmax(0,2fr); gap:18px; align-items:start; }
   @media (max-width:900px) { .layout { grid-template-columns:1fr; } }
-  .panel { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:16px; }
-  .stack { display:grid; gap:14px; }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:16px; padding:16px 18px; }
+  .stack { display:grid; gap:12px; }
   h2 { font-size:18px; margin:0 0 10px; }
-  .step { display:grid; grid-template-columns:40px minmax(0,1fr); gap:12px; padding:14px; border:1px solid var(--line);
-          border-radius:10px; background:var(--panel); }
-  .step.next { border-color:var(--accent); box-shadow:0 0 0 1px var(--accent) inset; }
-  .step.done { opacity:.62; }
-  .num { width:36px; height:36px; border-radius:50%; background:var(--chip); display:grid; place-items:center; font-weight:700; }
-  .step.next .num { background:var(--accent); color:var(--accent-text); }
-  .step h3 { font-size:17px; margin:4px 0 4px; }
-  .step p { margin:0 0 10px; color:var(--muted); }
-  .tag { font-size:13px; padding:1px 8px; border-radius:99px; background:var(--chip); margin-left:6px; font-weight:600; }
-  button { font:inherit; border:1px solid var(--line); background:var(--chip); color:var(--text); border-radius:8px;
-           padding:8px 14px; cursor:pointer; min-height:40px; }
-  button.primary { background:var(--accent); color:var(--accent-text); border-color:var(--accent); font-weight:600; }
-  button.on { outline:2px solid var(--accent); outline-offset:1px; font-weight:700; }
+  .step { display:grid; grid-template-columns:44px minmax(0,1fr); gap:14px; padding:14px 16px; border:1px solid var(--line);
+          border-radius:16px; background:var(--panel); }
+  .step.next { border-color:var(--band); box-shadow:0 0 0 2px var(--band) inset; }
+  .step.done { opacity:.6; }
+  .num { width:40px; height:40px; border-radius:10px; background:var(--chip); display:grid; place-items:center; font-weight:800; font-size:18px; }
+  .step.next .num { background:var(--band); color:var(--band-text); }
+  .step h3 { font-size:17px; margin:6px 0 4px; }
+  .step p { margin:0 0 10px; color:var(--muted); max-width:70ch; }
+  .tag { font-size:13px; padding:2px 9px; border-radius:99px; background:var(--chip); margin-left:8px; font-weight:700; white-space:nowrap; }
+  button { font:inherit; border:1px solid var(--line); background:var(--panel); color:var(--text); border-radius:10px;
+           padding:8px 14px; cursor:pointer; min-height:42px; }
+  button:hover { border-color:var(--band); }
+  button:focus-visible { outline:3px solid var(--band); outline-offset:2px; }
+  button.primary { background:var(--band); color:var(--band-text); border-color:var(--band); font-weight:700; }
+  button.on { background:var(--band); color:var(--band-text); border-color:var(--band); font-weight:700; }
   button:disabled { opacity:.5; cursor:progress; }
-  .row { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin:6px 0; }
+  .row { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin:8px 0 0; }
   .label { color:var(--muted); min-width:44px; }
-  .ok { color:var(--good); font-weight:600; }
-  .wait { color:var(--warn); font-weight:600; }
-  .note { margin:0 0 14px; padding:10px 14px; border-radius:10px; background:var(--chip); min-height:44px; }
-  .zones { display:grid; grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); gap:8px; }
-  .zone { border:1px solid var(--line); border-radius:8px; padding:8px 10px; }
-  .zone b { display:block; font-size:18px; }
-  .JUST_LEFT { border-color:var(--good); } .JUST_LEFT .st { color:var(--good); }
-  .LEAVING_SOON { border-color:var(--warn); } .LEAVING_SOON .st { color:var(--warn); }
+  .ok { color:var(--open); font-weight:700; }
+  .wait { color:var(--soon); font-weight:700; }
+  .note { margin:0 0 14px; padding:12px 16px; border-radius:12px; background:var(--panel); border:1px solid var(--line);
+          border-left:6px solid var(--band); min-height:48px; }
+  .floors { display:grid; gap:8px; }
+  .floor { display:grid; grid-template-columns:64px minmax(0,1fr); border:1px solid var(--line); border-radius:12px; overflow:hidden; }
+  .band { background:var(--band); color:var(--band-text); display:grid; place-items:center; font-size:22px; font-weight:800; }
+  .zone { display:grid; grid-template-columns:auto minmax(0,1fr) auto; gap:10px; align-items:center; padding:8px 12px; min-height:52px; }
+  .zone + .zone { border-top:1px solid var(--line); }
+  .mark { font-size:26px; font-weight:800; line-height:1; min-width:1.2em; }
+  .mark small { font-size:14px; font-weight:500; color:var(--muted); margin-left:4px; }
+  .notes { color:var(--muted); font-size:14px; text-align:right; }
+  .count { font-size:24px; font-weight:800; font-variant-numeric:tabular-nums; min-width:3.4em; text-align:right; }
+  .open .count { color:var(--open); } .soon .count { color:var(--soon); }
+  .taken .count { color:var(--taken); } .quiet .count { color:var(--taken); font-weight:500; font-size:15px; }
   .small { color:var(--muted); font-size:14px; }
-  a { color:var(--accent); }
+  a { color:var(--band); }
+  @media (prefers-color-scheme: dark) { a { color:#6eaaff; } }
 </style>
 </head>
 <body>
 <main>
   <h1>ParkwithH 시연 콘솔</h1>
-  <p class="sub">A차가 코엑스 주차장 지하 2층 B구역에서 나가면, B차는 앱을 열지 않고도 그 소식을 듣고 같은 구역에 주차합니다.</p>
+  <p class="sub">A차가 코엑스 주차장 지하 2층 B구역에서 나갑니다. B차는 앱을 열지 않은 채 주차장 100m 앞에서 층별 주차 가능 구역을 듣고,
+     앞차가 가는 구역을 피해 갈 곳을 알린 뒤, 한 번 눌러 주차를 마칩니다.</p>
   <div class="note" id="note" role="status" aria-live="polite">불러오는 중</div>
   <div class="layout">
     <section class="stack" id="steps" aria-label="장면 순서">
@@ -527,12 +607,21 @@ PAGE = r"""<!doctype html>
       </div>
     </section>
     <section class="stack">
+      <div class="panel">
+        <h2>주차 가능 구역 (서버가 보는 코엑스 주차장)</h2>
+        <div id="board" class="small">불러오는 중</div>
+        <p class="small">앱 차량의 출차 기준입니다. 자리 보장은 아닙니다.
+           <a id="dash" target="_blank" rel="noopener">운영사 대시보드 열기</a></p>
+      </div>
       <div class="panel" id="carA"></div>
       <div class="panel" id="carB"></div>
       <div class="panel">
-        <h2>코엑스 주차장 현황 (서버)</h2>
-        <div id="board" class="small">불러오는 중</div>
-        <p class="small"><a id="dash" target="_blank" rel="noopener">운영사 대시보드 열기</a> · 원시 이벤트 로그와 함께 봅니다.</p>
+        <h2>가상 차량</h2>
+        <p class="small">에뮬레이터가 아닌 차의 이벤트를 서버에 대신 보냅니다. 내용은 정해져 있습니다.</p>
+        <div class="row">
+          <button id="seed">다른 층 출차 2건과 앞차 넣기</button>
+          <button id="take">B차가 가던 지하 2층 B구역에 먼저 주차</button>
+        </div>
       </div>
       <div class="panel">
         <h2>다시 하기</h2>
@@ -544,7 +633,8 @@ PAGE = r"""<!doctype html>
 </main>
 <script>
 const SCENES = __SCENES__;
-const CARS = { A: "A차 · 먼저 주차했다가 나가는 차", B: "B차 · 소식을 듣고 들어오는 차" };
+const CARS = { A: "A차: 먼저 주차했다가 나가는 차", B: "B차: 목록을 듣고 들어오는 차" };
+const PLACES = [["lot", "코엑스 주차장 안"], ["near", "100m 앞"], ["away", "주차장 밖"]];
 let busy = false;
 
 const el = (tag, attrs = {}, text) => {
@@ -578,7 +668,7 @@ SCENES.forEach((s, i) => {
   step.append(el("div", { class: "num" }, String(n)));
   const body = el("div");
   const h = el("h3", {}, s.title);
-  h.append(el("span", { class: "tag" }, s.car + "차"));
+  h.append(el("span", { class: "tag" }, s.car === "가상" ? "가상 차량" : s.car + "차"));
   body.append(h, el("p", {}, s.screen));
   const button = el("button", { class: "primary" }, s.button);
   button.onclick = () => act("/api/scene/" + n, s.button);
@@ -587,12 +677,14 @@ SCENES.forEach((s, i) => {
   document.getElementById("steps").append(step);
 });
 document.getElementById("reset").onclick = () => act("/api/reset", "처음부터 다시");
+document.getElementById("seed").onclick = () => act("/api/virtual/seed", "가상 차량 넣기");
+document.getElementById("take").onclick = () => act("/api/virtual/take", "가상 차량 주차");
 
 function renderCar(name, car) {
   const box = document.getElementById("car" + name);
   box.replaceChildren();
   box.append(el("h2", {}, CARS[name]));
-  const info = el("div", { class: "small" }, `${car.serial} · Virtual Console 127.0.0.1:${car.console} · `);
+  const info = el("div", { class: "small" }, `${car.serial}, Virtual Console 127.0.0.1:${car.console}, `);
   info.append(el("span", { class: car.appReady ? "ok" : "wait" }, car.appReady ? "앱 실행 중" : "동의 대기"));
   box.append(info);
   const gears = el("div", { class: "row" });
@@ -605,7 +697,7 @@ function renderCar(name, car) {
   box.append(gears);
   const places = el("div", { class: "row" });
   places.append(el("span", { class: "label" }, "위치"));
-  [["lot", "코엑스 주차장 안"], ["away", "주차장 밖"]].forEach(([key, text]) => {
+  PLACES.forEach(([key, text]) => {
     const b = el("button", { class: car.place === key ? "on" : "", "aria-pressed": String(car.place === key) }, text);
     b.onclick = () => act(`/api/car/${name}/place/${key}`, `${name}차 위치 이동`);
     places.append(b);
@@ -613,29 +705,46 @@ function renderCar(name, car) {
   box.append(places);
 }
 
-const zoneText = id => {
-  if (id === "UNZONED") return "구역 미입력";
-  const m = /^(B?)(\d)(F?)(?:-(.+))?$/.exec(id);
-  if (!m) return id;
-  return (m[1] ? "지하 " : "") + m[2] + "층" + (m[4] ? " " + m[4] + "구역" : "");
-};
-const stateText = z => z.status === "JUST_LEFT" ? "방금 1대 출차" : z.status === "LEAVING_SOON" ? "곧 나갈 차 있음"
-  : z.status === "FULLNESS" ? "운전자 응답: " + z.fullness : "소식 없음";
+const ZONE = /^(B?)(\d)(F?)(?:-(.+))?$/;
+const badge = id => { const m = ZONE.exec(id); return !m ? "?" : m[1] ? "B" + m[2] : m[2] + "F"; };
+const mark = id => { const m = ZONE.exec(id); return m && m[4] ? m[4] : ""; };
+const floorRank = id => { const m = ZONE.exec(id); return !m ? Infinity : m[1] ? Number(m[2]) : -Number(m[2]); };
+const age = ms => ms < 60000 ? "방금" : Math.floor(ms / 60000) + "분 전";
+
+function zoneRow(z) {
+  const departures = z.vacancies.length, claims = z.claims || 0;
+  const state = departures ? (departures > claims ? "open" : "taken") : z.leaving_soon ? "soon" : "quiet";
+  const row = el("div", { class: "zone " + state });
+  const name = el("div", { class: "mark" }, mark(z.zone_id) || (z.zone_id === "UNZONED" ? "미입력" : "전체"));
+  if (mark(z.zone_id)) name.append(el("small", {}, "구역"));
+  const notes = [];
+  if (departures) notes.push(age(z.vacancies[0]));
+  if (claims) notes.push(`가는 중 ${claims}대`);
+  notes.push(`주차 중 ${z.parked_app_cars}대`);
+  const count = departures ? `${departures}곳` : z.leaving_soon ? `곧 ${z.leaving_soon}곳` : "소식 없음";
+  row.append(name, el("div", { class: "notes" }, notes.join(", ")), el("div", { class: "count" }, count));
+  return row;
+}
 
 function renderBoard(board) {
   const box = document.getElementById("board");
   box.replaceChildren();
   if (!board) { box.textContent = "서버에 연결할 수 없습니다."; return; }
-  box.append(el("p", {}, `앱 차량 ${board.parkedAppCars}대 주차 중 · 등록 약 ${(Math.round(board.registeredCapacity / 100) * 100).toLocaleString("ko-KR")}면`));
+  const capacity = (Math.round(board.registeredCapacity / 100) * 100).toLocaleString("ko-KR");
+  box.append(el("p", {}, `주차 중인 앱 차량 ${board.parkedAppCars}대, 등록 약 ${capacity}면`));
   if (!board.zones.length) { box.append(el("p", {}, "아직 공유된 구역 소식이 없습니다.")); return; }
-  const grid = el("div", { class: "zones" });
-  board.zones.forEach(z => {
-    const card = el("div", { class: "zone " + z.status });
-    card.append(el("b", {}, zoneText(z.zone_id)), el("div", { class: "st" }, stateText(z)),
-                el("div", { class: "small" }, `주차 중 ${z.parked_app_cars}대`));
-    grid.append(card);
+  const floors = new Map();
+  board.zones.slice().sort((a, b) => floorRank(a.zone_id) - floorRank(b.zone_id) || a.zone_id.localeCompare(b.zone_id))
+    .forEach(z => { const k = badge(z.zone_id); if (!floors.has(k)) floors.set(k, []); floors.get(k).push(z); });
+  const list = el("div", { class: "floors" });
+  floors.forEach((zones, key) => {
+    const floor = el("div", { class: "floor" });
+    const rows = el("div");
+    rows.append(...zones.map(zoneRow));
+    floor.append(el("div", { class: "band" }, key), rows);
+    list.append(floor);
   });
-  box.append(grid);
+  box.append(list);
 }
 
 async function refresh() {

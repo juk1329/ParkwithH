@@ -2,6 +2,7 @@ package app.parkrelay
 
 import android.car.Car
 import android.car.VehiclePropertyIds
+import android.car.drivingstate.CarUxRestrictions
 import android.car.drivingstate.CarUxRestrictionsManager
 import android.car.hardware.CarPropertyValue
 import android.car.hardware.property.CarPropertyManager
@@ -18,7 +19,8 @@ class CarSignals(
     private val context: Context,
     private val onGear: (Gear) -> Unit,
     private val onSpeed: (Float) -> Unit,
-    private val onDrivingRestricted: (Boolean) -> Unit,
+    /** Null while the car has not said, or can no longer say, whether driving restrictions apply. */
+    private val onDrivingRestricted: (Boolean?) -> Unit,
 ) {
     private var car: Car? = null
     private var properties: CarPropertyManager? = null
@@ -51,7 +53,15 @@ class CarSignals(
 
     fun start() {
         car = Car.createCar(context, null, Car.CAR_WAIT_TIMEOUT_WAIT_FOREVER) { connected, ready ->
-            if (ready) connect(connected) else Trace.log("car", "service lost")
+            if (ready) {
+                connect(connected)
+            } else {
+                Trace.log("car", "service lost")
+                properties = null
+                ux = null
+                // Not knowing is treated as restricted by everyone who asks.
+                onDrivingRestricted(null)
+            }
         }
     }
 
@@ -74,8 +84,8 @@ class CarSignals(
         Trace.guarded("ux register") {
             val restrictions = connected.getCarManager(Car.CAR_UX_RESTRICTION_SERVICE) as CarUxRestrictionsManager
             ux = restrictions
-            restrictions.registerListener { update -> onDrivingRestricted(update.isRequiresDistractionOptimization) }
-            onDrivingRestricted(restrictions.currentCarUxRestrictions.isRequiresDistractionOptimization)
+            restrictions.registerListener { update -> onDrivingRestricted(isRestricted(update)) }
+            onDrivingRestricted(isRestricted(restrictions.currentCarUxRestrictions))
         }
     }
 
@@ -101,7 +111,15 @@ class CarSignals(
         }
     }
 
-    private companion object {
-        const val GLOBAL_AREA = 0
+    companion object {
+        private const val GLOBAL_AREA = 0
+
+        /**
+         * Any active restriction counts, not only the general flag: this app's input screens are a
+         * keypad and settings, and a region may restrict those specifically.
+         */
+        fun isRestricted(restrictions: CarUxRestrictions): Boolean =
+            restrictions.isRequiresDistractionOptimization ||
+                restrictions.activeRestrictions != CarUxRestrictions.UX_RESTRICTIONS_BASELINE
     }
 }

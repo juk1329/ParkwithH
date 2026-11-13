@@ -11,6 +11,11 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import app.parkrelay.core.AdviceGate
+import app.parkrelay.core.ApproachEffect
+import app.parkrelay.core.ApproachInput
+import app.parkrelay.core.ApproachPhase
+import app.parkrelay.core.ApproachReducer
+import app.parkrelay.core.ApproachState
 import app.parkrelay.core.Confidence
 import app.parkrelay.core.Destination
 import app.parkrelay.core.Effect
@@ -30,6 +35,7 @@ import app.parkrelay.core.LotResolver
 import app.parkrelay.core.Phase
 import app.parkrelay.core.SessionReducer
 import app.parkrelay.core.SessionState
+import app.parkrelay.core.ShareTier
 import app.parkrelay.core.SpeechGate
 import app.parkrelay.core.SpokenAnswer
 import app.parkrelay.core.ZoneParser
@@ -37,7 +43,11 @@ import app.parkrelay.core.ZoneSignal
 import app.parkrelay.core.distanceMeters
 import app.parkrelay.core.OwnEvents
 import app.parkrelay.core.message
+import java.io.File
 import java.util.UUID
+
+/** Whether the car allows input right now. Not knowing is treated as not allowed. */
+enum class DrivingState { UNKNOWN, RESTRICTED, UNRESTRICTED }
 
 /**
  * Owns the parking session. It lives in a foreground service rather than a screen, because the app
@@ -75,7 +85,11 @@ class ParkingService : Service() {
 
     internal var state = SessionState()
         private set
-    private var drivingRestricted = false
+
+    /** Until the car says otherwise, input is treated as not allowed. */
+    internal var drivingState = DrivingState.UNKNOWN
+        private set
+    private val inputAllowed: Boolean get() = drivingState == DrivingState.UNRESTRICTED
     private var destination: Destination? = null
     private var targetLot: Lot? = null
     private var subscription: Backend.Subscription? = null
@@ -83,14 +97,44 @@ class ParkingService : Service() {
     private val speechGate = SpeechGate()
     private val ownEvents = OwnEvents()
     private var pendingPrompt: LotResolution? = null
+
+    /** One microphone: [asking] is true from a question being queued until its answer or silence. */
     private var asking = false
+    private var askToken: Any? = null
+
+    private val approachReducer = ApproachReducer(newId = { UUID.randomUUID().toString() })
+    private var approach: ApproachState? = null
+    private var headedZone: String? = null
+    private val refreshBoard = Runnable { fetchApproachBoard() }
+
+    /** True when the service was started without consent and is only on its way out. */
+    private var idle = false
+    private var erased = false
 
     /** The open screen, if any. The service never depends on one. */
     internal var onUiChange: (() -> Unit)? = null
-    internal val isDriving: Boolean get() = drivingRestricted
     internal val approachLot: Lot? get() = targetLot
+    internal val approachBoard: LotBoard? get() = approach?.board
+    internal val approachNear: Boolean get() = approach?.phase == ApproachPhase.NEAR
+
+    /** The zone this car said it is heading for, or was pointed to. */
+    internal val headingZone: String? get() = approach?.claimedZone
+    internal val headingPublished: Boolean get() = approach?.claim?.published == true
     internal var lastGuidance: String? = null
         private set
+
+    /** For the debug probe only: straight into the offline queue, past the session. */
+    internal fun enqueueForProbe(event: app.parkrelay.core.OutEvent) = queue.add(event)
+
+    internal fun flushForProbe() = queue.flush()
+
+    /** For the debug probe: one line a test script can read. */
+    internal fun approachDebug(): String {
+        val current = approach ?: return "none"
+        val list = current.board?.let { app.parkrelay.core.BoardText.listText(it, current.claimedZone) }?.replace("\n", " / ")
+        return "phase=${current.phase} near=${current.phase == ApproachPhase.NEAR} claim=${current.claimedZone} " +
+            "published=${current.claim?.published} told=${current.listTold} list=[$list]"
+    }
 
     private val screenReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -103,12 +147,20 @@ class ParkingService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        instance = this
         Trace.log("service", "created uptimeFromBoot=${android.os.SystemClock.elapsedRealtime()}")
         settings = Settings(this)
         notify = NotifyCenter(this)
         notify.createChannels()
+        // A service started in the foreground must show itself even if it is about to stop.
         goForeground()
+        if (!settings.consent) {
+            // No consent, no work: no restored session, no position, no queue. Whatever started us was mistaken.
+            Trace.log("service", "no consent, stopping")
+            idle = true
+            stopSelf()
+            return
+        }
+        instance = this
 
         catalog = loadCatalog(this)
         Trace.log("service", "catalog lots=${catalog.size}")
@@ -139,9 +191,13 @@ class ParkingService : Service() {
             },
             onDrivingRestricted = { restricted ->
                 handler.post {
-                    Trace.log("ux", "restricted=$restricted")
-                    drivingRestricted = restricted
-                    if (restricted) notify.cancelButtons()
+                    drivingState = when (restricted) {
+                        null -> DrivingState.UNKNOWN
+                        true -> DrivingState.RESTRICTED
+                        false -> DrivingState.UNRESTRICTED
+                    }
+                    Trace.log("ux", "restricted=$restricted state=$drivingState")
+                    if (!inputAllowed) notify.cancelButtons()
                     uiChanged()
                 }
             },
@@ -156,12 +212,13 @@ class ParkingService : Service() {
             this,
             onFix = { fix -> handler.post { onFix(fix) } },
             onExitedLot = { lotId -> handler.post { if (state.lot?.id == lotId) dispatch(Input.LeftLot(now())) } },
-            onArrivedAtLot = { lotId -> Trace.log("approach", "arrived near $lotId") },
+            // Inside the lot's own radius is certainly within a hundred metres of its edge.
+            onArrivedAtLot = { lotId -> handler.post { arrivedAt(lotId, "proximity alert") } },
         )
         navi = NaviSource(
             this,
             onDestination = { place, _ -> handler.post { onDestination(place) } },
-            onArrived = { Trace.log("approach", "navigation arrived") },
+            onArrived = { handler.post { targetLot?.let { arrivedAt(it.id, "navigation") } } },
         )
 
         registerReceiver(screenReceiver, IntentFilter(Intent.ACTION_SCREEN_ON), RECEIVER_NOT_EXPORTED)
@@ -185,12 +242,22 @@ class ParkingService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         Trace.log("service", "start action=${intent?.action}")
+        if (idle) return START_NOT_STICKY
         intent?.let(::handleAction)
         return START_STICKY
     }
 
+    /**
+     * Every action here comes from a button. Buttons are only shown while input is allowed, but a tap
+     * can arrive late, after the car has started moving, so the state is checked again where it acts.
+     */
     private fun handleAction(intent: Intent) {
-        when (intent.action) {
+        val action = intent.action ?: return
+        if (!inputAllowed) {
+            Trace.log("ux", "ignored $action: input is not allowed now ($drivingState)")
+            return
+        }
+        when (action) {
             ACTION_CONFIRM_ZONE -> {
                 stopAsking()
                 notify.cancelPrompt()
@@ -228,6 +295,8 @@ class ParkingService : Service() {
             }
 
             ACTION_DISMISS_ADVICE -> notify.cancelAdvice()
+            ACTION_DECLINE_HEADING -> declineHeading()
+            ACTION_PICK_HEADING -> intent.getStringExtra(EXTRA_ZONE)?.let(::pickHeading)
             ACTION_KEYPAD_RESULT -> {
                 stopAsking()
                 notify.cancelPrompt()
@@ -238,7 +307,9 @@ class ParkingService : Service() {
 
     /** The driver answered with a tap, so a question still being read and an open microphone are both pointless. */
     private fun stopAsking() {
+        if (!asking) return
         asking = false
+        askToken = null
         voice.interrupt()
         voiceInput.cancel()
     }
@@ -248,15 +319,38 @@ class ParkingService : Service() {
     }
 
     internal fun dispatch(input: Input) {
+        if (erased) return
         val before = state.phase
+        val lotBefore = state.lot
         val step = reducer.reduce(state, input)
         state = step.state
         store.save(state)
         if (state.phase != before) {
             Trace.log("session", "$before -> ${state.phase} by ${input::class.simpleName}")
+            // Before the effects: the claim is released ahead of the PARK it leads to, so the server
+            // never counts this car both as parked in a departure and as still heading for it.
+            followSession(before, lotBefore)
             uiChanged()
         }
         step.effects.forEach(::apply)
+    }
+
+    private fun followSession(before: Phase, lotBefore: Lot?) {
+        when (state.phase) {
+            Phase.PARKED -> {
+                approachInput(ApproachInput.Parked(now()))
+                notify.cancelList()
+            }
+            // Back on the road with the destination still set: a new approach. A pause that never
+            // became a parking (P_TENTATIVE) leaves the running approach as it is.
+            Phase.DRIVING -> {
+                val lot = targetLot
+                if (lot != null && before != Phase.P_TENTATIVE && approach?.phase == ApproachPhase.ENDED) {
+                    beginApproach(lot, leavingThisLot = lotBefore?.id == lot.id)
+                }
+            }
+            else -> Unit
+        }
     }
 
     private fun uiChanged() {
@@ -271,9 +365,9 @@ class ParkingService : Service() {
         }, "board-load").start()
     }
 
-    /** The server choice changed, so any open stream belongs to the old one. */
+    /** The server choice changed, so any open stream belongs to the old one, and so does any claim made there. */
     internal fun backendChanged() {
-        stopApproach()
+        stopApproach(publish = false)
         destination?.let(::onDestination)
         queue.flush()
         uiChanged()
@@ -291,13 +385,65 @@ class ParkingService : Service() {
         demo.simulateDeparture(lot.id, DEMO_ZONE, DEMO_DELAY_MILLIS)
     }
 
+    /**
+     * Demo mode: the emulator's car cannot drive, so this stands in for arriving a hundred metres from
+     * the lot, where other cars (made up, and labelled so) have left spaces on several floors.
+     */
+    internal fun simulateNear() {
+        if (!settings.demoMode) return
+        val lot = targetLot ?: catalog.byId(DEMO_LOT_ID)?.also(::startApproach) ?: return
+        demo.seedApproach(lot.id)
+        if (approach?.phase != ApproachPhase.FAR) beginApproach(lot, leavingThisLot = false)
+        Trace.log("approach", "demo: placed near ${Trace.detail(lot.id)}")
+        approachInput(ApproachInput.Distance(DEMO_NEAR_METERS, now()))
+    }
+
+    /** The driver switched sharing for a lot. It applies to the parking in progress, not only to the next one. */
+    internal fun shareChanged(lotId: String, allow: Boolean) {
+        if (state.lot?.id == lotId) dispatch(Input.ShareAnswered(allow, now()))
+        if (targetLot?.id == lotId) restartApproach()
+    }
+
+    /** "Tell others my zone" was switched, so the running approach starts over under the new rule. */
+    internal fun headingSettingChanged() = restartApproach()
+
+    private fun restartApproach() {
+        stopApproach(publish = true)
+        destination?.let(::onDestination)
+    }
+
+    internal fun pickHeading(zoneId: String) {
+        notify.cancelList()
+        approachInput(ApproachInput.Pick(zoneId, now()))
+    }
+
+    internal fun declineHeading() {
+        notify.cancelList()
+        approachInput(ApproachInput.Decline(now()))
+    }
+
+    /**
+     * Consent withdrawn. Everything this app keeps on the car goes, and nothing still queued is sent.
+     * The caller clears the settings and stops the service.
+     */
+    internal fun eraseEverything() {
+        Trace.log("service", "erasing local data")
+        stopAsking()
+        voice.silence()
+        voiceInput.cancel()
+        stopApproach(publish = false)
+        queue.close()
+        handler.removeCallbacksAndMessages(null)
+        location.stopWatchingExit()
+        notify.cancelAll()
+        erased = true
+        state = SessionState()
+        eraseFiles(this)
+    }
+
     private fun apply(effect: Effect) {
         when (effect) {
-            is Effect.Publish -> {
-                Trace.log("publish", "${effect.event.type} lot=${effect.event.lotId} zone=${effect.event.zoneId}")
-                ownEvents.add(effect.event.eventId)
-                queue.add(effect.event)
-            }
+            is Effect.Publish -> publish(effect.event)
 
             Effect.ResolveLot -> resolveLot()
 
@@ -326,6 +472,12 @@ class ParkingService : Service() {
         }
     }
 
+    private fun publish(event: app.parkrelay.core.OutEvent) {
+        Trace.log("publish", "${event.type} ${Trace.detail("lot=${event.lotId} zone=${event.zoneId}")}")
+        ownEvents.add(event.eventId)
+        queue.add(event)
+    }
+
     private fun resolveLot() {
         val at = now()
         // The demo's car cannot actually drive there, so parking counts as having arrived. The screen says this is a demo.
@@ -334,12 +486,15 @@ class ParkingService : Service() {
         val resolution = demoLot?.let { LotResolution.Single(it, Confidence.HIGH) }
             ?: resolver.resolve(destination, settings.confirmedLots(), fixes.last, at)
         val search = (resolution as? LotResolution.Single)?.let { fixes.searchSeconds(it.lot, at) }
-        Trace.log("lot", "resolved $resolution search=$search")
+        Trace.log("lot", "resolved ${Trace.detail(resolution)} search=$search")
         dispatch(Input.Resolved(resolution, search, at))
     }
 
     private fun promptPark(resolution: LotResolution, askShare: Boolean) {
         pendingPrompt = resolution
+        // Parking has begun: the list has done its job, and a question still open belongs to the drive.
+        notify.cancelList()
+        stopAsking()
         when (resolution) {
             is LotResolution.Ambiguous -> notify.lotChoice(resolution.candidates)
             is LotResolution.Single -> {
@@ -357,21 +512,38 @@ class ParkingService : Service() {
 
     private fun promptDeparture(lot: Lot) {
         notify.departurePrompt(lot)
-        ask("지금 어느 구역에서 출발하세요?", null)
+        askZone("지금 어느 구역에서 출발하세요?", null)
     }
 
-    private fun askZoneByVoice(suggested: String?) = ask(Guidance.parkQuestion(suggested), suggested)
+    private fun askZoneByVoice(suggested: String?) = askZone(Guidance.parkQuestion(suggested), suggested)
 
-    /** Speaks, and only then opens the microphone, so the car does not hear its own question. */
-    private fun ask(question: String, suggested: String?) {
+    private fun askZone(question: String, suggested: String?) = ask(question) { text -> onZoneSpeech(text, suggested) }
+
+    /**
+     * Every spoken question goes through here, because there is one microphone. It speaks, and only
+     * after the question was heard to its end opens the microphone, so the car does not hear itself.
+     * A newer question replaces an older one. While one is open nothing else is spoken: a sentence
+     * naming a zone would be picked up as the driver's answer.
+     */
+    private fun ask(question: String, onHeard: (String?) -> Unit) {
+        voiceInput.cancel()
+        val token = Any()
         asking = true
-        voice.say(question) {
-            if (asking) {
-                voiceInput.listenOnce { text ->
-                    handler.post {
-                        asking = false
-                        onZoneSpeech(text, suggested)
-                    }
+        askToken = token
+        voice.say(question) { spoken ->
+            if (askToken !== token) return@say
+            if (!spoken) {
+                // Cut off by a call or another announcement: the driver never heard the question.
+                asking = false
+                askToken = null
+                return@say
+            }
+            voiceInput.listenOnce { text ->
+                handler.post {
+                    if (askToken !== token) return@post
+                    asking = false
+                    askToken = null
+                    onHeard(text)
                 }
             }
         }
@@ -392,12 +564,18 @@ class ParkingService : Service() {
         voice.say("${Guidance.spokenZone(zoneId)}에 저장했어요.")
     }
 
-    /** A zone just announced for this lot is the likeliest answer; otherwise where this car parked last. */
-    private fun suggestedZone(lot: Lot): String? =
-        guidedZone.takeIf { targetLot?.id == lot.id } ?: settings.lastZone(lot.id)
+    /**
+     * The zone this car said it was heading for is the likeliest answer, then a zone just announced
+     * for this lot, then where this car parked here last.
+     */
+    private fun suggestedZone(lot: Lot): String? {
+        val heading = targetLot?.id == lot.id
+        return headedZone.takeIf { heading } ?: guidedZone.takeIf { heading } ?: settings.lastZone(lot.id)
+    }
 
     private fun onFix(fix: Fix) {
         fixes.add(fix)
+        feedDistance(fix)
         val lot = state.lot ?: return
         if (state.phase != Phase.LEAVING && state.phase != Phase.VACATED) return
         val away = distanceMeters(fix.lat, fix.lng, lot.lat, lot.lng) > lot.radiusM + EXIT_MARGIN_METERS
@@ -407,18 +585,18 @@ class ParkingService : Service() {
     private fun onDestination(place: Destination?) {
         destination = place
         if (place == null) {
-            stopApproach()
+            stopApproach(publish = true)
             return
         }
         val advice = advisor.advise(place)
-        Trace.log("approach", "destination=${place.name} advice=$advice")
+        Trace.log("approach", "destination=${Trace.detail(place.name)} advice=${Trace.detail(advice)}")
         val lot = when (advice) {
             is LotAdvice.AtDestination -> advice.lot
             is LotAdvice.Nearby -> advice.lot
             null -> null
         }
         if (advice != null && adviceGate.shouldAnnounce(place, advice)) announce(advice)
-        if (lot != null) startApproach(lot) else stopApproach()
+        if (lot != null) startApproach(lot) else stopApproach(publish = true)
         uiChanged()
     }
 
@@ -431,34 +609,54 @@ class ParkingService : Service() {
             }
 
             // Stopped: a button is safe. Moving: ask aloud and take a spoken yes, with no tap involved.
-            !drivingRestricted -> {
+            inputAllowed -> {
                 notify.lotAdvice(advice.message(), routable)
                 voice.say(advice.message())
             }
 
             else -> {
                 notify.lotAdvice(advice.message(), null)
-                voice.say("${advice.message()} 안내할까요?") {
-                    voiceInput.listenOnce { text ->
-                        handler.post {
-                            if (text != null && ZoneParser.parse(text) == SpokenAnswer.Yes) navi.routeTo(routable)
-                        }
-                    }
+                ask("${advice.message()} 안내할까요?") { text ->
+                    if (text != null && ZoneParser.parse(text) == SpokenAnswer.Yes) navi.routeTo(routable)
                 }
             }
         }
     }
 
+    // --- Approach: the list of zones a hundred metres out, and saying where this car is heading ---
+
     private fun startApproach(lot: Lot) {
         if (targetLot?.id == lot.id && subscription != null) return
-        stopApproach()
+        stopApproach(publish = true)
         targetLot = lot
         location.watchArrival(lot)
         subscription = backend.subscribe(lot.id) { signal -> handler.post { onSignal(signal) } }
-        Trace.log("approach", "watching ${lot.id}")
+        Trace.log("approach", "watching ${Trace.detail(lot.id)}")
+        // A car already parked in this very lot is not arriving; it gets an approach when it drives again.
+        beginApproach(lot, leavingThisLot = state.lot?.id == lot.id && state.phase != Phase.DRIVING)
     }
 
-    private fun stopApproach() {
+    private fun beginApproach(lot: Lot, leavingThisLot: Boolean) {
+        headedZone = null
+        approach = approachReducer.start(lot, mayPublish = mayShareHeading(lot), leavingThisLot = leavingThisLot)
+        scheduleBoardRefresh(0)
+        fixes.last?.takeIf { now() - it.atMillis <= FRESH_FIX_MILLIS }?.let(::feedDistance)
+    }
+
+    /** The same rule as for sharing a parking: consent, a lot that may be shared, and the driver's own switch. */
+    private fun mayShareHeading(lot: Lot): Boolean {
+        if (!settings.consent || !settings.shareHeading || lot.tier == ShareTier.NEVER) return false
+        return settings.sharePreference(lot.id) ?: (lot.tier == ShareTier.AUTO)
+    }
+
+    private fun stopApproach(publish: Boolean) {
+        approach?.let { current ->
+            approachReducer.reduce(current, ApproachInput.Stopped(publish, now())).effects.forEach(::applyApproach)
+        }
+        approach = null
+        headedZone = null
+        handler.removeCallbacks(refreshBoard)
+        notify.cancelList()
         subscription?.cancel()
         subscription = null
         targetLot = null
@@ -467,17 +665,108 @@ class ParkingService : Service() {
         location.stopWatchingArrival()
     }
 
+    private fun approachInput(input: ApproachInput) {
+        val current = approach ?: return
+        val step = approachReducer.reduce(current, input)
+        approach = step.state
+        if (step.state.phase != current.phase) {
+            // "near" is what the test scripts wait for.
+            val name = step.state.phase.name.lowercase()
+            Trace.log("approach", "$name ${Trace.detail(current.lot.id)} by ${input::class.simpleName}")
+        }
+        if (step.state.phase != ApproachPhase.ENDED) headedZone = step.state.claimedZone
+        step.effects.forEach(::applyApproach)
+        if (step.state != current) uiChanged()
+    }
+
+    private fun applyApproach(effect: ApproachEffect) {
+        when (effect) {
+            ApproachEffect.FetchBoard -> scheduleBoardRefresh(0)
+            is ApproachEffect.Publish -> publish(effect.event)
+            is ApproachEffect.TellList -> tellList(effect)
+            is ApproachEffect.Tell -> tell(effect.sentence)
+        }
+    }
+
+    /** Only a car on the road is approaching. A parked one keeps its distance to itself. */
+    private fun feedDistance(fix: Fix) {
+        val lot = targetLot ?: return
+        if (state.phase != Phase.DRIVING) return
+        val toEdge = distanceMeters(fix.lat, fix.lng, lot.lat, lot.lng) - lot.radiusM
+        approachInput(ApproachInput.Distance(toEdge, now()))
+    }
+
+    private fun arrivedAt(lotId: String, source: String) {
+        Trace.log("approach", "arrived by $source")
+        if (targetLot?.id != lotId || state.phase != Phase.DRIVING) return
+        approachInput(ApproachInput.Distance(0.0, now()))
+    }
+
+    /** Several signals often arrive together; one fetch a moment later answers them all. */
+    private fun scheduleBoardRefresh(delayMillis: Long = BOARD_DEBOUNCE_MILLIS) {
+        handler.removeCallbacks(refreshBoard)
+        handler.postDelayed(refreshBoard, delayMillis)
+    }
+
+    private fun fetchApproachBoard() {
+        val lot = targetLot ?: return
+        if (approach?.phase == ApproachPhase.ENDED) return
+        loadBoard(lot.id) { board ->
+            if (targetLot?.id != lot.id) return@loadBoard
+            // With no network at the entrance, the list is still told, from what was last known.
+            val known = board ?: approach?.takeIf { it.phase == ApproachPhase.NEAR && !it.listTold }?.board
+            // While the car is parking the board is not needed, and telling the list then would talk over the prompt.
+            if (known != null && state.phase == Phase.DRIVING) approachInput(ApproachInput.Board(known, now()))
+            // The stream has no replay, so a missed signal is caught by asking again while it matters.
+            if (approach?.phase == ApproachPhase.NEAR) scheduleBoardRefresh(NEAR_REFRESH_MILLIS)
+        }
+    }
+
+    private fun tellList(list: ApproachEffect.TellList) {
+        lastGuidance = null
+        val canChange = inputAllowed && list.claimedZone != null
+        notify.zoneList(list.title, list.text, withButtons = canChange)
+        if (state.gear == Gear.REVERSE) return
+        voice.say(list.spoken)
+        val followUp = list.followUp ?: return
+        // What was just said to other cars can be changed by naming another zone, or withdrawn.
+        if (headingPublished && settings.voiceQuestions) ask(followUp, ::onHeadingSpeech) else voice.say(followUp)
+    }
+
+    private fun onHeadingSpeech(text: String?) {
+        when (val answer = text?.let(ZoneParser::parse)) {
+            is SpokenAnswer.Zone -> approachInput(ApproachInput.Pick(answer.zoneId, now()))
+            SpokenAnswer.No -> approachInput(ApproachInput.Decline(now()))
+            else -> Unit
+        }
+    }
+
+    private fun tell(sentence: String) {
+        lastGuidance = sentence
+        uiChanged()
+        notify.guide(sentence)
+        if (state.gear != Gear.REVERSE && !asking) voice.say(sentence)
+    }
+
     /** A signal about the lot this car is heading to. Only a car looking for a space has any use for it. */
     private fun onSignal(signal: ZoneSignal) {
         Trace.log("signal", "$signal phase=${state.phase}")
+        // Whatever it is, the list may have changed, this car's own events included.
+        if (approach != null && approach?.phase != ApproachPhase.ENDED) scheduleBoardRefresh()
         if (state.phase != Phase.DRIVING || ownEvents.isOwn(signal)) return
+        // A door opening somewhere is a hint for the operator's dashboard, not something to say to a driver.
+        if (signal.weak) return
         val sentence = Guidance.sentence(signal) ?: return
+        if (approach?.speaksSignals == false) {
+            Trace.log("approach", "quiet: the list comes first, nearer the lot")
+            return
+        }
         if (signal.type == EventType.VACATED) guidedZone = signal.zoneId
         lastGuidance = sentence
         uiChanged()
         notify.guide(sentence)
         val reversing = state.gear == Gear.REVERSE
-        if (!reversing && speechGate.allow(signal, now())) voice.say(sentence)
+        if (!reversing && !asking && speechGate.allow(signal, now())) voice.say(sentence)
     }
 
     /** Runs at start and on screen on, since suspend may end with no boot event at all. */
@@ -501,6 +790,10 @@ class ParkingService : Service() {
 
     override fun onDestroy() {
         Trace.log("service", "destroyed")
+        if (idle) {
+            super.onDestroy()
+            return
+        }
         instance = null
         handler.removeCallbacksAndMessages(null)
         Trace.guarded("service stop") { unregisterReceiver(screenReceiver) }
@@ -525,6 +818,8 @@ class ParkingService : Service() {
         const val ACTION_ROUTE_TO_LOT = "app.parkrelay.ROUTE_TO_LOT"
         const val ACTION_DISMISS = "app.parkrelay.DISMISS"
         const val ACTION_DISMISS_ADVICE = "app.parkrelay.DISMISS_ADVICE"
+        const val ACTION_DECLINE_HEADING = "app.parkrelay.DECLINE_HEADING"
+        const val ACTION_PICK_HEADING = "app.parkrelay.PICK_HEADING"
         const val EXTRA_ZONE = "zone"
         const val EXTRA_LOT = "lot"
 
@@ -533,15 +828,26 @@ class ParkingService : Service() {
         private const val DEMO_LOT_ID = "59446-29391-00005-00-1" // 코엑스 주차장, a real lot.
         private const val DEMO_ZONE = "B2-B"                     // Made up. The catalog has no zones.
         private const val DEMO_DELAY_MILLIS = 10_000L
+        private const val DEMO_NEAR_METERS = 80.0
+        private const val BOARD_DEBOUNCE_MILLIS = 300L
+        private const val NEAR_REFRESH_MILLIS = 15_000L
+        private const val FRESH_FIX_MILLIS = 30_000L
 
         internal var instance: ParkingService? = null
             private set
+
+        /** The session and the unsent events. Called with or without a running service. */
+        fun eraseFiles(context: Context) {
+            listOf("session.json", "session.json.tmp", EventQueue.FILE_NAME, "${EventQueue.FILE_NAME}.tmp")
+                .forEach { File(context.filesDir, it).delete() }
+        }
 
         /**
          * Android refuses a foreground start from most background contexts. That must not crash the
          * app: the service starts on the next boot or the next time the driver opens the app.
          */
         fun start(context: Context) {
+            if (!Settings(context).consent) return
             try {
                 context.startForegroundService(Intent(context, ParkingService::class.java))
             } catch (e: IllegalStateException) {
