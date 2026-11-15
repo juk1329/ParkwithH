@@ -8,8 +8,8 @@
 
 | 항목 | 내용 |
 |---|---|
-| APK | [`apk/이거어디까지내려가는거에요_ParkwithH_release.apk`](apk/) (release 서명, 약 27MB) |
-| 시연 영상 | [`demo/ParkwithH_demo.mp4`](demo/ParkwithH_demo.mp4) (2분 33초, 에뮬레이터 2대의 실제 동작 녹화. 기어·속도·위치·경로는 시험 도구로 넣었고, 목록을 채우는 다른 차들은 가상 차량입니다) |
+| APK | [`apk/이거어디까지내려가는거예요_ParkwithH_release.apk`](apk/) (release 서명, 약 27MB) |
+| 시연 영상 | [`demo/ParkwithH_demo.mp4`](demo/ParkwithH_demo.mp4) (2분 40초, 에뮬레이터 2대의 실제 동작 녹화. 기어·속도·위치·경로는 시험 도구로 넣었고, 목록을 채우는 다른 차들은 가상 차량입니다) |
 | 기본 시연 | [에뮬레이터 2대 + 시연 콘솔](#2-차량-2대로-보기-기본-시연): 나가는 차의 자리가 서버를 거쳐 들어오는 차의 목록에 뜨고, 주차장에 도착하면 가는 구역이 확정되고, 주차로 사라지는 전체 장면, 약 5분 |
 | 저자원 환경 | [에뮬레이터 1대 + APK만으로 데모 모드](#3-저자원-환경-한-대로-보기-데모-모드): 서버 없이 다른 차를 앱이 흉내 냅니다, 약 3분 |
 
@@ -161,8 +161,8 @@ Pleos 공식 문서 [에뮬레이터 설치](https://document.pleos.ai/docs/conn
 
 ```bash
 python -m uvicorn server.app:app --host 127.0.0.1 --port 8787          # 서버
-adb -s emulator-5554 install -r apk/이거어디까지내려가는거에요_ParkwithH_release.apk
-adb -s emulator-5556 install -r apk/이거어디까지내려가는거에요_ParkwithH_release.apk
+adb -s emulator-5554 install -r apk/이거어디까지내려가는거예요_ParkwithH_release.apk
+adb -s emulator-5556 install -r apk/이거어디까지내려가는거예요_ParkwithH_release.apk
 adb -s emulator-5554 forward tcp:8088 tcp:8088                          # 차량 A Virtual Console
 adb -s emulator-5556 forward tcp:8089 tcp:8088                          # 차량 B Virtual Console
 ```
@@ -189,7 +189,7 @@ adb -s emulator-5556 forward tcp:8089 tcp:8088                          # 차량
 저장소 루트에서 설치하고 Virtual Console을 연결합니다.
 
 ```bash
-adb install -r apk/이거어디까지내려가는거에요_ParkwithH_release.apk
+adb install -r apk/이거어디까지내려가는거예요_ParkwithH_release.apk
 adb forward tcp:8088 tcp:8088
 ```
 
@@ -291,7 +291,7 @@ tools/emu.sh stop 1                       # 저장소를 동기화하고 끔
 
 ## APK 파일 위치
 
-`apk/이거어디까지내려가는거에요_ParkwithH_release.apk` (release 서명, 버전 0.1.0)
+`apk/이거어디까지내려가는거예요_ParkwithH_release.apk` (release 서명, 버전 0.1.0)
 
 ## 사용한 SDK와 확인 상태
 
