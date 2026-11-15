@@ -151,6 +151,7 @@ object EventCodec {
                     parkedAppCars = zone.getInt("parked_app_cars"),
                     // Absent on a server from before claims existed.
                     claims = zone.optInt("claims", 0),
+                    confirmed = zone.optInt("confirmed", 0),
                 )
             },
         )

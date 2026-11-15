@@ -3,12 +3,14 @@ package app.parkrelay.core
 /**
  * A car on its way to a lot. FAR: the list of zones is kept up to date in silence. NEAR: within
  * [ApproachConfig.nearMeters] of the lot's edge, the list is told once and the car says which zone
- * it is heading for, so the cars behind it are pointed elsewhere. ENDED: parked, or going elsewhere.
+ * it is heading for, so the cars behind it are pointed elsewhere. Once inside the lot that claim is
+ * confirmed, and a driver who finds no space there says so and is pointed to the next zone.
+ * ENDED: parked, or going elsewhere.
  */
 enum class ApproachPhase { FAR, NEAR, ENDED }
 
 /** "I am heading to this zone." [published] is false when the lot may not be shared: it then only guides this car. */
-data class Claim(val zoneId: String, val at: Long, val published: Boolean)
+data class Claim(val zoneId: String, val at: Long, val published: Boolean, val confirmed: Boolean = false)
 
 data class ApproachConfig(
     /** Distance to the lot's edge (catalog radius) at which the list is told. */
@@ -36,6 +38,10 @@ data class ApproachState(
      * away from the lot before being near it means arriving.
      */
     val armed: Boolean = true,
+    /** The car has entered the lot. Latched, like NEAR. A published claim made or held from here on is confirmed. */
+    val inside: Boolean = false,
+    /** Zones where this driver found no space. They are not recommended again on this approach. */
+    val missed: Set<String> = emptySet(),
 ) {
     val claimedZone: String? get() = claim?.zoneId
 
@@ -64,6 +70,9 @@ sealed interface ApproachInput {
 
     /** The driver does not want other cars told. */
     data class Decline(override val at: Long) : ApproachInput
+
+    /** The driver found no space in the zone the car was heading for. */
+    data class Missed(override val at: Long) : ApproachInput
 
     /** This car's parking was confirmed, in whichever zone or lot. */
     data class Parked(override val at: Long) : ApproachInput
@@ -110,6 +119,7 @@ class ApproachReducer(
             is ApproachInput.Board -> onBoard(state, input)
             is ApproachInput.Pick -> onPick(state, input)
             is ApproachInput.Decline -> onDecline(state, input.at)
+            is ApproachInput.Missed -> onMissed(state, input.at)
             is ApproachInput.Parked -> end(state, input.at, publish = true)
             is ApproachInput.Stopped -> end(state, input.at, input.publish)
         }
@@ -119,12 +129,34 @@ class ApproachReducer(
         val meters = input.metersToEdge ?: return ApproachStep(state)
         val located = state.copy(distanceKnown = true, armed = state.armed || meters > config.nearMeters)
         if (!state.armed) return ApproachStep(located)
+        if (meters > config.nearMeters) return ApproachStep(located)
+        val here = located.copy(inside = located.inside || meters <= 0.0)
         // NEAR latches: GPS jitter at the entrance must not tell the list twice.
-        if (located.phase != ApproachPhase.FAR || meters > config.nearMeters) return ApproachStep(located)
+        if (here.phase != ApproachPhase.FAR) return confirmIfInside(ApproachStep(here), input.at, announce = true)
         // The board in hand may be seconds or minutes old, and the list is told only once. So it is told
         // from the board fetched now, when that arrives, never from the one in hand.
-        return ApproachStep(located.copy(phase = ApproachPhase.NEAR), listOf(ApproachEffect.FetchBoard))
+        return ApproachStep(here.copy(phase = ApproachPhase.NEAR), listOf(ApproachEffect.FetchBoard))
     }
+
+    /**
+     * Inside the lot, "heading there" becomes "confirmed": the cars behind see it as settled. It is
+     * still no reservation. Only a published claim is confirmed, since nobody else sees the others.
+     */
+    private fun confirmIfInside(step: ApproachStep, at: Long, announce: Boolean): ApproachStep {
+        val state = step.state
+        val claim = state.claim ?: return step
+        if (!state.inside || !claim.published || claim.confirmed) return step
+        val time = maxOf(at, claim.at + 1)
+        val confirmed = state.copy(claim = claim.copy(at = time, confirmed = true))
+        val publish = ApproachEffect.Publish(event(state, EventType.CLAIM_CONFIRM, claim.zoneId, time))
+        val told = if (announce) {
+            listOf(ApproachEffect.Tell("주차장에 도착했어요. ${Guidance.spokenZone(claim.zoneId)}으로 확정했어요."))
+        } else emptyList()
+        return ApproachStep(confirmed, step.effects + publish + told)
+    }
+
+    private fun claimHere(state: ApproachState, zoneId: String, at: Long, replaces: Claim? = null): ApproachStep =
+        confirmIfInside(claim(state, zoneId, at, replaces), at, announce = false)
 
     private fun onBoard(state: ApproachState, input: ApproachInput.Board): ApproachStep {
         val previous = state.board
@@ -145,10 +177,11 @@ class ApproachReducer(
         val told = state.copy(listTold = true)
         val best = BoardText.recommend(board, told.claimedZone)?.zoneId
         val claims = best != null && told.claim == null && config.autoClaim && !told.declined
-        val step = if (claims) claim(told, best!!, at) else ApproachStep(told)
+        val step = if (claims) claimHere(told, best!!, at) else ApproachStep(told)
         val place = Guidance.spokenZone(best)
         val followUp = when {
             place == null -> null
+            step.state.claim?.confirmed == true -> "${place}으로 확정했어요. 다른 구역이면 말씀해 주세요."
             step.state.claim?.published == true -> "${place}으로 간다고 알렸어요. 다른 구역이면 말씀해 주세요."
             else -> "${place} 쪽을 권해요."
         }
@@ -157,7 +190,7 @@ class ApproachReducer(
             followUp = followUp,
             title = "${BoardText.LIST_TITLE} · ${state.lot.name}",
             // The claim just made belongs in the notification too.
-            text = BoardText.listText(board, step.state.claimedZone) ?: text,
+            text = BoardText.listText(board, step.state.claimedZone, step.state.claim?.confirmed == true) ?: text,
             claimedZone = step.state.claimedZone,
             suggestedZone = best,
         )
@@ -169,11 +202,11 @@ class ApproachReducer(
         val claim = state.claim
         if (claim == null) {
             // Nothing could be claimed when the list was told; a departure since then can be.
-            val best = BoardText.recommend(board, null)?.zoneId
+            val best = BoardText.recommend(board, null, state.missed)?.zoneId
             if (best == null || !config.autoClaim || state.declined) return ApproachStep(state)
-            val step = claim(state, best, at)
+            val step = claimHere(state, best, at)
             val told = if (step.state.claim?.published == true) {
-                listOf(ApproachEffect.Tell("${Guidance.spokenZone(best)}으로 간다고 알렸어요."))
+                listOf(ApproachEffect.Tell(headingSentence(step.state)))
             } else emptyList()
             return ApproachStep(step.state, step.effects + told)
         }
@@ -184,13 +217,14 @@ class ApproachReducer(
         // A departure that vanished while the parked count rose was taken by a car; otherwise it only aged out.
         val takenByCar = before != null && before.vacancyAges.isNotEmpty() &&
             (row?.parkedAppCars ?: 0) > before.parkedAppCars
-        val next = BoardText.recommend(board, null)?.zoneId
-        val moved = if (next != null) claim(state.copy(claim = null), next, at, replaces = claim) else release(state, at)
+        val next = BoardText.recommend(board, null, state.missed)?.zoneId
+        val moved = if (next != null) claimHere(state.copy(claim = null), next, at, replaces = claim) else release(state, at)
         if (!takenByCar) return moved
         val place = Guidance.spokenZone(claim.zoneId)
         val alternative = next?.let { zoneId ->
             val count = BoardText.unclaimed(board.zones.first { it.zoneId == zoneId }, null)
-            " ${Guidance.spokenZone(zoneId)}에 ${count}곳 있어요."
+            " ${Guidance.spokenZone(zoneId)}에 ${count}곳 있어요." +
+                if (moved.state.claim?.confirmed == true) " 그쪽으로 확정했어요." else ""
         }.orEmpty()
         val sentence = "가시려던 ${place}에 다른 차가 먼저 주차했어요.$alternative"
         return ApproachStep(moved.state, listOf(ApproachEffect.Tell(sentence)) + moved.effects)
@@ -198,10 +232,43 @@ class ApproachReducer(
 
     private fun onPick(state: ApproachState, input: ApproachInput.Pick): ApproachStep {
         if (state.claimedZone == input.zoneId) return ApproachStep(state)
-        val step = claim(state.copy(declined = false), input.zoneId, input.at, replaces = state.claim)
+        val step = claimHere(state.copy(declined = false), input.zoneId, input.at, replaces = state.claim)
         val place = Guidance.spokenZone(input.zoneId)
-        val sentence = if (step.state.claim?.published == true) "${place}으로 간다고 알렸어요." else "${place}으로 기억해 둘게요."
+        val sentence = if (step.state.claim?.published == true) headingSentence(step.state) else "${place}으로 기억해 둘게요."
         return ApproachStep(step.state, step.effects + ApproachEffect.Tell(sentence))
+    }
+
+    private fun headingSentence(state: ApproachState): String {
+        val place = Guidance.spokenZone(state.claimedZone)
+        return if (state.claim?.confirmed == true) "${place}으로 확정했어요." else "${place}으로 간다고 알렸어요."
+    }
+
+    /**
+     * No space where the car was heading: the claim ends at once, the server drops that zone's stale
+     * departures, and the next zone with a departure nobody is heading for takes its place.
+     */
+    private fun onMissed(state: ApproachState, at: Long): ApproachStep {
+        val claim = state.claim ?: return ApproachStep(state)
+        val time = maxOf(at, claim.at + 1)
+        val cleared = state.copy(claim = null, missed = state.missed + claim.zoneId)
+        val reported = if (claim.published) {
+            listOf(ApproachEffect.Publish(event(state, EventType.CLAIM_MISSED, claim.zoneId, time)))
+        } else emptyList()
+        val what = if (claim.confirmed) "확정을" else "가는 구역 알림을"
+        val cancelled = "${Guidance.spokenZone(claim.zoneId)} $what 취소했어요."
+        val next = state.board?.let { BoardText.recommend(it, null, cleared.missed) }
+        if (next == null || state.declined) {
+            val sentence = "$cancelled 다른 출차 소식이 생기면 알려 드릴게요."
+            return ApproachStep(cleared, reported + ApproachEffect.Tell(sentence))
+        }
+        val step = claimHere(cleared, next.zoneId, time + 1)
+        val heading = when {
+            step.state.claim?.confirmed == true -> " 그쪽으로 확정했어요."
+            step.state.claim?.published == true -> " 그쪽으로 간다고 알렸어요."
+            else -> ""
+        }
+        val sentence = "$cancelled ${Guidance.spokenZone(next.zoneId)}에 ${BoardText.unclaimed(next, null)}곳 있어요.$heading"
+        return ApproachStep(step.state, reported + step.effects + ApproachEffect.Tell(sentence))
     }
 
     private fun onDecline(state: ApproachState, at: Long): ApproachStep {

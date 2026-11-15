@@ -48,6 +48,7 @@ class ZoneView:
     vacancies: list[int] = field(default_factory=list)  # Age in milliseconds, newest first.
     leaving_soon: int = 0
     claims: int = 0              # Approaching cars that said they are heading here.
+    confirmed: int = 0           # Of those, the cars already inside the lot.
     fullness: str | None = None
     fullness_age: int | None = None
 
@@ -69,6 +70,9 @@ def fresh_vacancies(events: list[Event], zone_id: str, now: int) -> list[int]:
             continue
         if event.type == "VACATED":
             tokens.append(event.occurred_at)
+        elif event.type == "CLAIM_MISSED":
+            # A driver went there and found no space: a car this app cannot see took what was left.
+            tokens.clear()
         elif event.type == "PARK" and event.session_id not in arrived:
             # A session's first report here is its arrival. A repeat only restates where it is.
             arrived.add(event.session_id)
@@ -108,21 +112,24 @@ def _leaving_soon(events: list[Event], zone_id: str, now: int) -> int:
     )
 
 
-def active_claims(events: list[Event], now: int) -> dict[str, str]:
-    """Which zone each approaching car is heading for, by approach id.
+CLAIM_EVENTS = ("CLAIM", "CLAIM_CONFIRM", "CLAIM_CANCEL", "CLAIM_MISSED")
 
-    The latest CLAIM or CLAIM_CANCEL of an approach decides: a new CLAIM moves it, a cancel or old age
-    ends it. A claim says nothing about whether a space is there, so it is counted beside the
-    departures and never subtracted here.
+
+def active_claims(events: list[Event], now: int) -> dict[str, tuple[str, bool]]:
+    """Which zone each approaching car is heading for, and whether it is confirmed, by approach id.
+
+    The latest claim event of an approach decides: a new CLAIM moves it, CLAIM_CONFIRM says the car is
+    now inside the lot, and a cancel, a miss or old age ends it. A claim says nothing about whether a
+    space is there, so it is counted beside the departures and never subtracted here.
     """
     latest: dict[str, Event] = {}
     for event in sorted(events, key=lambda e: e.occurred_at):
-        if event.type in ("CLAIM", "CLAIM_CANCEL"):
+        if event.type in CLAIM_EVENTS:
             latest[event.session_id] = event
     return {
-        session: event.zone_id
+        session: (event.zone_id, event.type == "CLAIM_CONFIRM")
         for session, event in latest.items()
-        if event.type == "CLAIM" and event.zone_id and 0 <= now - event.occurred_at <= CLAIM_TTL
+        if event.type in ("CLAIM", "CLAIM_CONFIRM") and event.zone_id and 0 <= now - event.occurred_at <= CLAIM_TTL
     }
 
 
@@ -140,7 +147,7 @@ def build_board(events: list[Event], now: int) -> list[ZoneView]:
     positions = _session_positions(events, now)
     claims = active_claims(events, now)
     # A claim with no zone says nothing, and must not create an "unzoned" row.
-    zones = {_zone_key(e.zone_id) for e in events if e.zone_id or e.type not in ("CLAIM", "CLAIM_CANCEL")}
+    zones = {_zone_key(e.zone_id) for e in events if e.zone_id or e.type not in CLAIM_EVENTS}
     views = []
     for zone in sorted(zones):
         vacancies = fresh_vacancies(events, zone, now)
@@ -151,7 +158,8 @@ def build_board(events: list[Event], now: int) -> list[ZoneView]:
             parked_app_cars=sum(1 for z in positions.values() if z == zone),
             vacancies=vacancies,
             leaving_soon=leaving,
-            claims=sum(1 for z in claims.values() if z == zone),
+            claims=sum(1 for z, _ in claims.values() if z == zone),
+            confirmed=sum(1 for z, sure in claims.values() if z == zone and sure),
             fullness=fullness,
             fullness_age=fullness_age,
         )
@@ -176,6 +184,6 @@ def should_push(event: Event, now: int) -> bool:
     """
     if event.type == "LEAVING_SOON":
         return now - event.occurred_at <= LEAVING_TTL
-    if event.type in ("VACATED", "PARK", "LEAVING_CANCEL", "CLAIM", "CLAIM_CANCEL"):
+    if event.type in ("VACATED", "PARK", "LEAVING_CANCEL", *CLAIM_EVENTS):
         return now - event.occurred_at <= TOKEN_TTL
     return False

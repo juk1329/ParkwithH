@@ -216,7 +216,12 @@ class MainActivity : Activity() {
         root.addView(lotHeader(lot))
         val heading = running.headingZone
         if (heading != null) {
-            root.addView(body(if (running.headingPublished) "뒤차에 알린 내 구역" else "권하는 구역"))
+            val label = when {
+                running.headingConfirmed -> "확정한 내 구역"
+                running.headingPublished -> "뒤차에 알린 내 구역"
+                else -> "권하는 구역"
+            }
+            root.addView(body(label))
             root.addView(text(Guidance.spokenZone(heading).orEmpty(), 76f, palette.mine, bold = true))
         }
         val board = running.approachBoard
@@ -301,6 +306,9 @@ class MainActivity : Activity() {
                     card.addView(zoneList(floors, heading, recommended(board, heading), large = false, onPick = pick))
                     card.addView(caption(BoardText.CAVEAT))
                 }
+                if (heading != null) {
+                    card.addView(secondary("${Guidance.spokenZone(heading)}에 자리 없어요") { running.missedHeading() }, spaced())
+                }
                 card.addView(caption(BoardText.sample(board)))
             }
         }
@@ -335,7 +343,8 @@ class MainActivity : Activity() {
         buttons.addView(secondary("1. 코엑스로 안내 시작") { service?.startDemoRoute() }, cell())
         if (settings.demoMode) {
             buttons.addView(secondary("2. 주차장 100m 앞 도착 (가상 위치)") { service?.simulateNear() }, cell())
-            buttons.addView(secondary("3. 10초 뒤 다른 차 출차") { service?.simulateDeparture() }, cell())
+            buttons.addView(secondary("3. 주차장 도착 (가상 위치)") { service?.simulateArrive() }, cell())
+            buttons.addView(secondary("4. 10초 뒤 다른 차 출차") { service?.simulateDeparture() }, cell())
         }
         card.addView(buttons)
         val recent = service?.demo?.recentActivity().orEmpty()
@@ -455,6 +464,12 @@ class MainActivity : Activity() {
                 closeKeypad()
             })
             root.addView(caption(BoardText.CAVEAT))
+            if (heading != null) {
+                root.addView(secondary("${Guidance.spokenZone(heading)}에 자리 없어요") {
+                    running.missedHeading()
+                    closeKeypad()
+                }, spaced())
+            }
             if (running.headingPublished) {
                 root.addView(secondary("알림 취소") {
                     running.declineHeading()
@@ -539,7 +554,7 @@ class MainActivity : Activity() {
         // This car's own row already says so in its note; the chip is for the zone it is pointed to.
         if (!isMine && row.zoneId == recommended) addView(chip("추천", palette.open))
         val noteInk = if (isMine) palette.mine else palette.secondary
-        addView(plain(BoardText.note(row, mine).orEmpty(), if (large) 36f else 26f, noteInk, bold = isMine).apply {
+        addView(plain(BoardText.note(row, mine, service?.headingConfirmed == true).orEmpty(), if (large) 36f else 26f, noteInk, bold = isMine).apply {
             gravity = Gravity.END
             setPadding(dp(GAP / 2), 0, dp(GAP), 0)
         }, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
@@ -752,7 +767,7 @@ class MainActivity : Activity() {
             "1번을 누르고 내비로 돌아가세요. 안내가 시작되면 주차장 규모를 알려 드려요.\n" +
                 "2번은 주차장 100m 앞에 도착한 상황을 만들어요. 층별 주차 가능 구역이 음성과 알림으로 오고, " +
                 "앞차가 가는 구역을 피해 추천 구역으로 간다고 알려요.\n" +
-                "3번을 누르면 10초 뒤 다른 차가 나가요. 앱을 닫아도 음성과 알림이 와요.\n" +
+                "3번을 누르면 주차장에 들어온 것으로 보고 가는 구역을 확정해요. 4번을 누르면 10초 뒤 다른 차가 나가요. 앱을 닫아도 음성과 알림이 와요.\n" +
                 "Virtual Console에서 기어를 R, P 순으로 바꾸면 내 차 위치 저장을 물어요."
 
         private const val SERVER_STEPS =

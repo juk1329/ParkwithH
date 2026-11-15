@@ -81,6 +81,10 @@ class ProbeReceiver : BroadcastReceiver() {
             // Names another zone, as the driver would by voice after the list.
             "claim" -> service.pickHeading(text)
             "unclaim" -> service.declineHeading()
+            // "No space there", as the driver would say it; and the question that lets them say it.
+            "missed" -> service.missedHeading()
+            "check" -> service.checkSpace()
+            "arrive" -> service.simulateArrive()
             // Queues this many harmless events (an EXIT of a session that never parked changes no board),
             // to check that a long time offline still drains in batches the server accepts.
             "flood" -> {

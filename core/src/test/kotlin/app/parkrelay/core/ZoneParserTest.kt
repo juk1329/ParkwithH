@@ -73,4 +73,13 @@ class ZoneParserTest {
         assertEquals("B2", ZoneParser.canonical("B2", null))
         assertEquals("1F", ZoneParser.canonical("1F", ""))
     }
+
+    @Test
+    fun `no space there is its own answer, and a zone name still wins`() {
+        for (speech in listOf("자리 없어요", "없어", "만차예요", "꽉 찼어", "못 했어요", "자리가 없네")) {
+            assertEquals(SpokenAnswer.Full, ZoneParser.parse(speech), speech)
+        }
+        assertEquals(SpokenAnswer.Zone("B3-C"), ZoneParser.parse("자리 없어 지하 3층 C구역"))
+        assertEquals(SpokenAnswer.No, ZoneParser.parse("취소"))
+    }
 }

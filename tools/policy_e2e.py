@@ -63,6 +63,10 @@ def main() -> int:
     car.probe("server", DEFAULT_SERVER)
     car.show_navigation()
     car.leave_any_session()
+    # Whatever an earlier run left behind (a parked session, a route still set) has reached the server by now.
+    car.forget_route()
+    time.sleep(3)
+    http(server, "/v1/admin/reset", "POST")
 
     print("\n== sharing switched off while parked stops that very parking from being shared")
     report.check(park_in_zone(car, ZONE), "the car parks and publishes")

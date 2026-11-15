@@ -27,7 +27,7 @@ ROOT = Path(__file__).resolve().parent.parent
 CATALOG_PATH = Path(os.environ.get("PARKRELAY_CATALOG", ROOT / "app/src/main/assets/lots.tsv"))
 DATABASE_PATH = os.environ.get("PARKRELAY_DB", str(ROOT / "server/parkrelay.db"))
 HEARTBEAT_SECONDS = 15
-API_VERSION = 2                  # 2 adds CLAIM events and "claims" per zone.
+API_VERSION = 3                  # 2 adds CLAIM events and "claims" per zone, 3 confirmed and missed claims.
 ZONE_PATTERN = re.compile(r"^[0-9A-Za-z가-힣-]{1,16}$")
 
 
@@ -37,7 +37,8 @@ class EventIn(BaseModel):
     eventId: str = Field(min_length=1, max_length=64)
     sessionId: str = Field(min_length=1, max_length=64)
     type: Literal[
-        "PARK", "LEAVING_SOON", "LEAVING_CANCEL", "VACATED", "EXIT", "FULLNESS", "CLAIM", "CLAIM_CANCEL"
+        "PARK", "LEAVING_SOON", "LEAVING_CANCEL", "VACATED", "EXIT", "FULLNESS", "CLAIM", "CLAIM_CANCEL",
+        "CLAIM_CONFIRM", "CLAIM_MISSED"
     ]
     lotId: str = Field(min_length=1, max_length=32)
     zoneId: str | None = None

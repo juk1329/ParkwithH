@@ -21,7 +21,7 @@ enum class Phase { DRIVING, P_TENTATIVE, PARKED, LEAVING, VACATED }
  * CLAIM and CLAIM_CANCEL come from a car approaching a lot, not from a parking session: "I am heading
  * to this zone", so the cars behind it are pointed elsewhere.
  */
-enum class EventType { PARK, LEAVING_SOON, LEAVING_CANCEL, VACATED, EXIT, CLAIM, CLAIM_CANCEL }
+enum class EventType { PARK, LEAVING_SOON, LEAVING_CANCEL, VACATED, EXIT, CLAIM, CLAIM_CANCEL, CLAIM_CONFIRM, CLAIM_MISSED }
 
 /** What proved the car left its space, so the board can judge how far to trust a signal. */
 enum class Evidence { SPEED, GEAR_TIME, LEFT_LOT, RECOVERED }

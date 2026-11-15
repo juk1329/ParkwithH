@@ -106,6 +106,7 @@ class ParkingService : Service() {
     private var approach: ApproachState? = null
     private var headedZone: String? = null
     private val refreshBoard = Runnable { fetchApproachBoard() }
+    private val spaceCheck = Runnable { checkSpace() }
 
     /** True when the service was started without consent and is only on its way out. */
     private var idle = false
@@ -120,6 +121,7 @@ class ParkingService : Service() {
     /** The zone this car said it is heading for, or was pointed to. */
     internal val headingZone: String? get() = approach?.claimedZone
     internal val headingPublished: Boolean get() = approach?.claim?.published == true
+    internal val headingConfirmed: Boolean get() = approach?.claim?.confirmed == true
     internal var lastGuidance: String? = null
         private set
 
@@ -133,7 +135,7 @@ class ParkingService : Service() {
         val current = approach ?: return "none"
         val list = current.board?.let { app.parkrelay.core.BoardText.listText(it, current.claimedZone) }?.replace("\n", " / ")
         return "phase=${current.phase} near=${current.phase == ApproachPhase.NEAR} claim=${current.claimedZone} " +
-            "published=${current.claim?.published} told=${current.listTold} list=[$list]"
+            "published=${current.claim?.published} confirmed=${current.claim?.confirmed} inside=${current.inside} told=${current.listTold} list=[$list]"
     }
 
     private val screenReceiver = object : BroadcastReceiver() {
@@ -296,6 +298,7 @@ class ParkingService : Service() {
 
             ACTION_DISMISS_ADVICE -> notify.cancelAdvice()
             ACTION_DECLINE_HEADING -> declineHeading()
+            ACTION_MISSED_HEADING -> missedHeading()
             ACTION_PICK_HEADING -> intent.getStringExtra(EXTRA_ZONE)?.let(::pickHeading)
             ACTION_KEYPAD_RESULT -> {
                 stopAsking()
@@ -398,6 +401,14 @@ class ParkingService : Service() {
         approachInput(ApproachInput.Distance(DEMO_NEAR_METERS, now()))
     }
 
+    /** Demo mode: stands in for driving into the lot, where the zone this car is heading for is confirmed. */
+    internal fun simulateArrive() {
+        if (!settings.demoMode) return
+        if (approach?.phase != ApproachPhase.NEAR) simulateNear()
+        Trace.log("approach", "demo: placed inside the lot")
+        approachInput(ApproachInput.Distance(DEMO_INSIDE_METERS, now()))
+    }
+
     /** The driver switched sharing for a lot. It applies to the parking in progress, not only to the next one. */
     internal fun shareChanged(lotId: String, allow: Boolean) {
         if (state.lot?.id == lotId) dispatch(Input.ShareAnswered(allow, now()))
@@ -420,6 +431,23 @@ class ParkingService : Service() {
     internal fun declineHeading() {
         notify.cancelList()
         approachInput(ApproachInput.Decline(now()))
+    }
+
+    /** No space in the zone this car was heading for: that ends at once and the next zone is offered. */
+    internal fun missedHeading() {
+        notify.cancelList()
+        approachInput(ApproachInput.Missed(now()))
+    }
+
+    /**
+     * There is no microphone that listens all the time. So a while after the zone was confirmed, if the
+     * car is still driving, it is asked once, and "자리 없어요" is heard then.
+     */
+    internal fun checkSpace() {
+        val zone = approach?.claim?.takeIf { it.confirmed }?.zoneId ?: return
+        if (state.phase != Phase.DRIVING || asking || state.gear == Gear.REVERSE || !settings.voiceQuestions) return
+        Trace.log("approach", "asking whether there was a space")
+        ask("${Guidance.spokenZone(zone)}에 자리가 없으면 '자리 없어요'라고 말씀해 주세요.", ::onHeadingSpeech)
     }
 
     /**
@@ -554,7 +582,7 @@ class ParkingService : Service() {
         when (val answer = ZoneParser.parse(text)) {
             is SpokenAnswer.Zone -> confirmZone(answer.zoneId)
             SpokenAnswer.Yes -> suggested?.let(::confirmZone)
-            SpokenAnswer.No, SpokenAnswer.NotUnderstood -> Unit
+            SpokenAnswer.No, SpokenAnswer.Full, SpokenAnswer.NotUnderstood -> Unit
         }
     }
 
@@ -656,6 +684,7 @@ class ParkingService : Service() {
         approach = null
         headedZone = null
         handler.removeCallbacks(refreshBoard)
+        handler.removeCallbacks(spaceCheck)
         notify.cancelList()
         subscription?.cancel()
         subscription = null
@@ -675,6 +704,12 @@ class ParkingService : Service() {
             Trace.log("approach", "$name ${Trace.detail(current.lot.id)} by ${input::class.simpleName}")
         }
         if (step.state.phase != ApproachPhase.ENDED) headedZone = step.state.claimedZone
+        val confirmedBefore = current.claim?.takeIf { it.confirmed }?.zoneId
+        val confirmedNow = step.state.claim?.takeIf { it.confirmed }?.zoneId
+        if (confirmedNow != confirmedBefore) {
+            handler.removeCallbacks(spaceCheck)
+            if (confirmedNow != null) handler.postDelayed(spaceCheck, SPACE_CHECK_MILLIS)
+        }
         step.effects.forEach(::applyApproach)
         if (step.state != current) uiChanged()
     }
@@ -737,6 +772,7 @@ class ParkingService : Service() {
         when (val answer = text?.let(ZoneParser::parse)) {
             is SpokenAnswer.Zone -> approachInput(ApproachInput.Pick(answer.zoneId, now()))
             SpokenAnswer.No -> approachInput(ApproachInput.Decline(now()))
+            SpokenAnswer.Full -> approachInput(ApproachInput.Missed(now()))
             else -> Unit
         }
     }
@@ -819,6 +855,7 @@ class ParkingService : Service() {
         const val ACTION_DISMISS = "app.parkrelay.DISMISS"
         const val ACTION_DISMISS_ADVICE = "app.parkrelay.DISMISS_ADVICE"
         const val ACTION_DECLINE_HEADING = "app.parkrelay.DECLINE_HEADING"
+        const val ACTION_MISSED_HEADING = "app.parkrelay.MISSED_HEADING"
         const val ACTION_PICK_HEADING = "app.parkrelay.PICK_HEADING"
         const val EXTRA_ZONE = "zone"
         const val EXTRA_LOT = "lot"
@@ -829,6 +866,8 @@ class ParkingService : Service() {
         private const val DEMO_ZONE = "B2-B"                     // Made up. The catalog has no zones.
         private const val DEMO_DELAY_MILLIS = 10_000L
         private const val DEMO_NEAR_METERS = 80.0
+        private const val DEMO_INSIDE_METERS = -1.0
+        private const val SPACE_CHECK_MILLIS = 90_000L
         private const val BOARD_DEBOUNCE_MILLIS = 300L
         private const val NEAR_REFRESH_MILLIS = 15_000L
         private const val FRESH_FIX_MILLIS = 30_000L

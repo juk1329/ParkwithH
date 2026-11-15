@@ -86,7 +86,7 @@ def test_virtual_events_are_fixed_and_pass_the_servers_own_checks():
 def test_every_scene_has_a_button_and_the_near_point_is_inside_a_hundred_metres_of_the_edge():
     import math
 
-    assert len(dc.SCENES) == 6
+    assert len(dc.SCENES) == 7
     assert all({"car", "title", "button", "screen", "done"} <= set(scene) for scene in dc.SCENES)
     (lat, lng), (near_lat, near_lng) = dc.PLACES["lot"], dc.PLACES["near"]
     metres = math.hypot((near_lat - lat) * 111_320, (near_lng - lng) * 111_320 * math.cos(math.radians(lat)))
@@ -110,7 +110,7 @@ def test_requests_from_elsewhere_are_refused(console, headers):
     "/api/car/A/gear/X",
     "/api/car/A/place/37.5,127.0",
     "/api/car/A/gear/P;reboot",
-    "/api/scene/7",
+    "/api/scene/8",
     "/api/virtual/anything",
     "/api/car/A/place/gate",
     "/api/scene/1/../reset",

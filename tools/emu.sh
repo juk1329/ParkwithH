@@ -52,6 +52,9 @@ case "$command" in
       fi
       # The last run's log says why it ended, so it is kept. Its exit status and time are the last lines.
       [ -f "$LOG_DIR/$avd.log" ] && mv "$LOG_DIR/$avd.log" "$LOG_DIR/$avd.$(date +%H%M%S).log"
+      # Two software-rendered cars keep every core busy, and the emulator's sound then arrives in bursts.
+      # A longer playback buffer rides those out; without it the gaps are filled with silence.
+      export PULSE_LATENCY_MSEC="${EMU_AUDIO_BUFFER_MS:-300}"
       nohup setsid bash -c 'emulator "$@"; code=$?; echo "$(date +%T) emulator exited with status $code"' _ \
         -avd "$avd" -port "$port" -no-snapshot -no-boot-anim -show-kernel \
         -gpu "${EMU_GPU:-swiftshader_indirect}" -allow-host-audio "$@" >"$LOG_DIR/$avd.log" 2>&1 </dev/null &

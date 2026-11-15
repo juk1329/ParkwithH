@@ -166,6 +166,38 @@ def test_a_claim_without_a_zone_is_ignored_not_rejected():
     assert views == []
 
 
+def test_a_confirmed_claim_counts_as_a_claim_and_as_confirmed():
+    events = [ev("v", "VACATED", NOW - 2 * MIN), ev("c", "CLAIM", NOW - 60_000, session="a1"),
+              ev("k", "CLAIM_CONFIRM", NOW - 20_000, session="a1"), ev("d", "CLAIM", NOW - 10_000, session="a2")]
+    z = view(board.build_board(events, NOW))
+    assert (z.claims, z.confirmed) == (2, 1)
+    assert view(board.build_board(events, NOW + 9 * MIN + 30_000)).confirmed == 1  # Ten minutes from the confirmation.
+    assert view(board.build_board(events, NOW + 10 * MIN)).claims == 0
+
+
+def test_a_confirmed_claim_ends_with_a_cancel_or_moves_with_a_new_claim():
+    confirmed = [ev("c", "CLAIM_CONFIRM", NOW - 60_000, session="a1")]
+    assert view(board.build_board(confirmed + [ev("x", "CLAIM_CANCEL", NOW - 1_000, session="a1")], NOW)).confirmed == 0
+    moved = board.build_board(confirmed + [ev("m", "CLAIM", NOW - 1_000, zone="B1-A", session="a1")], NOW)
+    assert (view(moved).claims, view(moved, "B1-A").claims, view(moved, "B1-A").confirmed) == (0, 1, 0)
+
+
+def test_a_miss_ends_the_claim_and_drops_the_stale_departures_but_not_later_ones():
+    events = [ev("v1", "VACATED", NOW - 5 * MIN), ev("v2", "VACATED", NOW - 4 * MIN),
+              ev("other", "VACATED", NOW - 4 * MIN, zone="B1-A"),
+              ev("k", "CLAIM_CONFIRM", NOW - 3 * MIN, session="a1"), ev("m", "CLAIM_MISSED", NOW - 2 * MIN, session="a1")]
+    z = view(board.build_board(events, NOW))
+    assert (z.vacancies, z.claims, z.confirmed) == ([], 0, 0)
+    assert view(board.build_board(events, NOW), "B1-A").vacancies == [4 * MIN]
+    later = events + [ev("v3", "VACATED", NOW - 1 * MIN)]
+    assert view(board.build_board(later, NOW)).vacancies == [1 * MIN]
+
+
+def test_confirmations_and_misses_reach_the_cars_watching():
+    for type_ in ("CLAIM_CONFIRM", "CLAIM_MISSED"):
+        assert board.should_push(ev("e", type_, NOW - 1_000), NOW)
+
+
 def test_a_claim_is_not_a_parked_car():
     views = board.build_board([ev("c", "CLAIM", NOW - 1000, session="a1")], NOW)
     assert view(views).parked_app_cars == 0
@@ -317,4 +349,4 @@ def test_an_older_server_field_set_is_still_there(client):
 
 
 def test_health_names_the_api_version(client):
-    assert client.get("/v1/health").json() == {"ok": True, "api": 2}
+    assert client.get("/v1/health").json() == {"ok": True, "api": 3}

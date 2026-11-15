@@ -21,7 +21,7 @@ import app.parkrelay.core.ZoneSignal
  */
 class DemoBackend(private val capacityOf: (String) -> Int?) : Backend {
     private class Zone(var parked: Int = 0, var leaving: Int = 0, val tokens: MutableList<Long> = mutableListOf())
-    private class Heading(val zoneId: String, val at: Long)
+    private class Heading(val zoneId: String, val at: Long, val confirmed: Boolean = false)
 
     private val handler = Handler(Looper.getMainLooper())
     private val lots = mutableMapOf<String, MutableMap<String, Zone>>()
@@ -47,6 +47,19 @@ class DemoBackend(private val capacityOf: (String) -> Int?) : Backend {
                 val zoneId = event.zoneId ?: return
                 claims.getOrPut(event.lotId) { mutableMapOf() }[event.sessionId] = Heading(zoneId, event.occurredAt)
                 note("내 차 가는 중 알림", zoneId)
+                return
+            }
+            EventType.CLAIM_CONFIRM -> {
+                val zoneId = event.zoneId ?: return
+                claims.getOrPut(event.lotId) { mutableMapOf() }[event.sessionId] = Heading(zoneId, event.occurredAt, confirmed = true)
+                note("내 차 도착, 구역 확정", zoneId)
+                return
+            }
+            EventType.CLAIM_MISSED -> {
+                claims[event.lotId]?.remove(event.sessionId)
+                // The driver found no space: whatever departures were listed there are stale.
+                event.zoneId?.let { zones(event.lotId)[it]?.tokens?.clear() }
+                note("내 차 자리 없음, 확정 취소", event.zoneId)
                 return
             }
             EventType.CLAIM_CANCEL -> {
@@ -84,7 +97,7 @@ class DemoBackend(private val capacityOf: (String) -> Int?) : Backend {
                 note("내 차 출차", event.zoneId)
             }
             EventType.EXIT -> note("내 차 주차장 이탈", event.zoneId)
-            EventType.CLAIM, EventType.CLAIM_CANCEL -> Unit
+            EventType.CLAIM, EventType.CLAIM_CANCEL, EventType.CLAIM_CONFIRM, EventType.CLAIM_MISSED -> Unit
         }
     }
 
@@ -98,7 +111,8 @@ class DemoBackend(private val capacityOf: (String) -> Int?) : Backend {
         val heading = claims[lotId].orEmpty().values.filter { now - it.at <= TOKEN_MILLIS }
         val rows = zones(lotId).map { (id, zone) ->
             zone.tokens.removeAll { now - it > TOKEN_MILLIS }
-            ZoneRow(id, zone.tokens.map { now - it }.sorted(), zone.leaving, zone.parked, heading.count { it.zoneId == id })
+            ZoneRow(id, zone.tokens.map { now - it }.sorted(), zone.leaving, zone.parked,
+                heading.count { it.zoneId == id }, heading.count { it.zoneId == id && it.confirmed })
         }
         LotBoard(capacityOf(lotId), rows.sumOf { it.parkedAppCars }, BoardText.inFloorOrder(rows))
     }
@@ -114,10 +128,12 @@ class DemoBackend(private val capacityOf: (String) -> Int?) : Backend {
             val zones = zones(lotId)
             if (zones.values.any { zone -> zone.tokens.any { now - it < SEED_FRESH_MILLIS } }) return
             zones.getOrPut("B1-A") { Zone() }.tokens.add(now - 4 * MINUTE)
+            zones.getOrPut("B1-C") { Zone() }.tokens.add(now - 2 * MINUTE)
             zones.getOrPut("B2-B") { Zone() }.tokens.addAll(listOf(now - 3 * MINUTE, now - 1 * MINUTE))
             zones.getOrPut("B3-C") { Zone() }.leaving = 1
             claims.getOrPut(lotId) { mutableMapOf() }[CAR_AHEAD] = Heading("B1-A", now - 30_000)
             note("다른 차 출차", "B1-A")
+            note("다른 차 출차", "B1-C")
             note("다른 차 출차 2대", "B2-B")
             note("앞차 가는 중", "B1-A")
             note("다른 차 곧 출차", "B3-C")

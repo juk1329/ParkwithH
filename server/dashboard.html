@@ -48,8 +48,8 @@
   tr:first-child td { border-top:0; }
   td.type { font-weight:700; }
   .VACATED { color:var(--open); } .LEAVING_SOON { color:var(--soon); }
-  .CLAIM, .CLAIM_CANCEL { color:var(--band); }
-  @media (prefers-color-scheme: dark) { .CLAIM, .CLAIM_CANCEL { color:#6eaaff; } }
+  .CLAIM, .CLAIM_CANCEL, .CLAIM_CONFIRM, .CLAIM_MISSED { color:var(--band); }
+  @media (prefers-color-scheme: dark) { .CLAIM, .CLAIM_CANCEL, .CLAIM_CONFIRM, .CLAIM_MISSED { color:#6eaaff; } }
   .who { color:var(--muted); }
 </style>
 </head>
@@ -61,7 +61,7 @@
     <section>
       <h2>주차 가능 구역</h2>
       <div class="floors" id="floors"></div>
-      <p class="caveat">앱 차량의 출차·주차·가는 중 알림만으로 만든 목록입니다. 주차장 전체의 잔여 면수가 아니며 자리를 보장하지 않습니다.</p>
+      <p class="caveat">앱 차량의 출차·주차·가는 중·확정 알림만으로 만든 목록입니다. 주차장 전체의 잔여 면수가 아니며 자리를 보장하지 않습니다.</p>
     </section>
     <section class="log">
       <h2>원시 이벤트 로그</h2>
@@ -85,7 +85,7 @@ const clock = ms => {
 };
 const TYPE = {
   PARK: "주차", LEAVING_SOON: "곧 출차", LEAVING_CANCEL: "출차 취소", VACATED: "출차", EXIT: "주차장 이탈",
-  CLAIM: "가는 중 알림", CLAIM_CANCEL: "가는 중 해제", FULLNESS: "혼잡 응답",
+  CLAIM: "가는 중 알림", CLAIM_CANCEL: "가는 중 해제", CLAIM_CONFIRM: "도착 확정", CLAIM_MISSED: "자리 없음", FULLNESS: "혼잡 응답",
 };
 function el(tag, cls, text) {
   const node = document.createElement(tag);
@@ -101,7 +101,9 @@ function zoneRow(z) {
   if (mark(z.zone_id)) name.append(el("small", "", "구역"));
   const notes = [];
   if (departures) notes.push(age(z.vacancies[0]));
-  if (claims) notes.push(`가는 중 ${claims}대`);
+  const confirmed = Math.min(z.confirmed || 0, claims);
+  if (confirmed) notes.push(`확정 ${confirmed}대`);
+  if (claims > confirmed) notes.push(`가는 중 ${claims - confirmed}대`);
   notes.push(`주차 중 ${z.parked_app_cars}대`);
   const count = departures ? `${departures}곳` : z.leaving_soon ? `곧 ${z.leaving_soon}곳` : "소식 없음";
   row.append(name, el("div", "notes", notes.join(", ")), el("div", "count", count));

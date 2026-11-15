@@ -10,6 +10,8 @@ data class ZoneRow(
     val leavingSoon: Int,
     val parkedAppCars: Int,
     val claims: Int = 0,
+    /** Of [claims], the cars already inside the lot. */
+    val confirmed: Int = 0,
 )
 
 data class LotBoard(val capacity: Int?, val parkedAppCars: Int, val zones: List<ZoneRow>)
@@ -131,25 +133,28 @@ object BoardText {
     }
 
     /** What qualifies the count: who is heading there, or else how fresh the newest departure is. */
-    fun note(row: ZoneRow, mine: String?): String? {
+    fun note(row: ZoneRow, mine: String?, mineConfirmed: Boolean = false): String? {
         val newest = row.vacancyAges.firstOrNull() ?: return null
+        val isMine = mine == row.zoneId
         val others = othersClaims(row, mine)
+        val othersConfirmed = (row.confirmed - if (isMine && mineConfirmed) 1 else 0).coerceIn(0, others)
         val parts = buildList {
-            if (mine == row.zoneId) add("내가 가는 중")
-            if (others > 0) add("앞차 ${others}대 가는 중")
+            if (isMine) add(if (mineConfirmed) "내가 확정" else "내가 가는 중")
+            if (othersConfirmed > 0) add("앞차 ${othersConfirmed}대 확정")
+            if (others > othersConfirmed) add("앞차 ${others - othersConfirmed}대 가는 중")
         }
         return if (parts.isEmpty()) ago(newest) else parts.joinToString(", ")
     }
 
-    fun line(row: ZoneRow, mine: String?): String =
-        "${zoneLabel(row.zoneId)} ${count(row)}" + (note(row, mine)?.let { " · $it" } ?: "")
+    fun line(row: ZoneRow, mine: String?, mineConfirmed: Boolean = false): String =
+        "${zoneLabel(row.zoneId)} ${count(row)}" + (note(row, mine, mineConfirmed)?.let { " · $it" } ?: "")
 
     /** One line a floor, for a notification: "지하 2층  B구역 2곳 · 1분 전, C구역 곧 1곳". */
-    fun listText(board: LotBoard, mine: String?): String? {
+    fun listText(board: LotBoard, mine: String?, mineConfirmed: Boolean = false): String? {
         val floors = byFloor(board, mine)
         if (floors.isEmpty()) return null
         return floors.joinToString("\n") { floor ->
-            "${floor.label}  " + floor.zones.joinToString(", ") { line(it, mine) }
+            "${floor.label}  " + floor.zones.joinToString(", ") { line(it, mine, mineConfirmed) }
         }
     }
 
@@ -157,9 +162,9 @@ object BoardText {
      * The zone to head for: most departures nobody else is heading to, then the freshest departure,
      * then floor order. Null when every departure already has a car on its way.
      */
-    fun recommend(board: LotBoard, mine: String?): ZoneRow? =
+    fun recommend(board: LotBoard, mine: String?, except: Set<String> = emptySet()): ZoneRow? =
         inFloorOrder(board.zones)
-            .filter { it.zoneId != NO_ZONE && unclaimed(it, mine) > 0 }
+            .filter { it.zoneId != NO_ZONE && it.zoneId !in except && unclaimed(it, mine) > 0 }
             .sortedWith(compareBy({ -unclaimed(it, mine) }, { it.vacancyAges.first() }))
             .firstOrNull()
 

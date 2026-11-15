@@ -181,6 +181,10 @@ class Console:
             b.gear("D")
             b.move("near")
         elif number == 6:
+            # Still driving, now inside the lot: the app confirms the zone it said it was heading for.
+            b.gear("D")
+            b.move("lot")
+        elif number == 7:
             self.park(b)
         self.last_scene = number
         return SCENES[number - 1]["done"]
@@ -235,7 +239,7 @@ VIRTUAL = {
     ], "가상 차량: 지하 1층 A구역과 지하 3층 C구역에서 1대씩 나갔고, 앞차 1대가 지하 1층 A구역으로 가는 중입니다."),
     "take": ([
         ("PARK", "B2-B", "virtual-parker", 0),
-    ], "가상 차량: 다른 차가 지하 2층 B구역에 먼저 주차했습니다. B차가 그 구역으로 가던 중이면 다른 구역을 안내받습니다."),
+    ], "가상 차량: 다른 차가 지하 2층 B구역에 먼저 주차했습니다. B차가 그 구역으로 가던 중이거나 확정한 뒤면 다른 구역을 안내받습니다."),
 }
 
 # The page shows these in order. "screen" is what to do on the emulator, "done" what should follow.
@@ -266,10 +270,16 @@ SCENES = [
                "\"지하 2층 B구역으로 간다고 알렸어요\"라고 말한 뒤, 목록에 \"가는 중 1대\"가 붙습니다. "
                "마이크가 있으면 이때 다른 구역 이름이나 \"취소\"를 말해 바꿀 수 있습니다.",
      "done": "B차 위치를 주차장 경계 80m 앞으로 옮겼습니다. B차 화면의 배너와 음성을 확인하세요."},
+    {"car": "B", "title": "B차가 주차장에 들어와요",
+     "button": "B차 주차장 도착 (확정)",
+     "screen": "B차가 기어 D인 채로 주차장 안에 들어옵니다. \"주차장에 도착했어요. 지하 2층 B구역으로 확정했어요\"가 들리고 "
+               "목록의 \"가는 중 1대\"가 \"확정 1대\"로 바뀝니다. 90초 안에 주차하지 않으면 앱이 자리가 없는지 한 번 묻고, "
+               "마이크가 있으면 \"자리 없어요\"라고 답해 다른 구역을 안내받을 수 있습니다.",
+     "done": "B차 위치를 주차장 안으로 옮겼습니다. B차의 음성과 목록의 \"확정 1대\"를 확인하세요."},
     {"car": "B", "title": "B차가 주차해요",
      "button": "B차 주차 (후진 → P)",
      "screen": "B차 화면 위 \"지하 2층 B구역에 내 차 위치 저장\"에서 [맞아요]를 누르세요. 앱을 열지 않고 저장되고, "
-               "목록에서 지하 2층 B구역 1곳과 \"가는 중\"이 함께 사라집니다.",
+               "목록에서 지하 2층 B구역 1곳과 \"확정\"이 함께 사라집니다.",
      "done": "B차가 코엑스 주차장 안에서 R → P로 바뀌었습니다. B차 화면의 배너에서 [맞아요]를 누르세요."},
 ]
 
@@ -410,7 +420,7 @@ ROUTES = [
      f"차량 {m[1]} 기어를 {m[2]}로 바꿨습니다."),
     (re.compile(r"^/api/car/([AB])/place/(lot|near|away)$"), lambda c, m: c.cars[m[1]].move(m[2]) or
      f"차량 {m[1]} 위치를 {PLACE_NAMES[m[2]]}으로 옮겼습니다."),
-    (re.compile(r"^/api/scene/([1-6])$"), lambda c, m: c.scene(int(m[1]))),
+    (re.compile(r"^/api/scene/([1-7])$"), lambda c, m: c.scene(int(m[1]))),
     (re.compile(r"^/api/virtual/(seed|take)$"), lambda c, m: c.virtual(m[1])),
     (re.compile(r"^/api/reset$"), lambda c, m: c.reset()),
 ]
@@ -719,7 +729,9 @@ function zoneRow(z) {
   if (mark(z.zone_id)) name.append(el("small", {}, "구역"));
   const notes = [];
   if (departures) notes.push(age(z.vacancies[0]));
-  if (claims) notes.push(`가는 중 ${claims}대`);
+  const confirmed = Math.min(z.confirmed || 0, claims);
+  if (confirmed) notes.push(`확정 ${confirmed}대`);
+  if (claims > confirmed) notes.push(`가는 중 ${claims - confirmed}대`);
   notes.push(`주차 중 ${z.parked_app_cars}대`);
   const count = departures ? `${departures}곳` : z.leaving_soon ? `곧 ${z.leaving_soon}곳` : "소식 없음";
   row.append(name, el("div", { class: "notes" }, notes.join(", ")), el("div", { class: "count" }, count));

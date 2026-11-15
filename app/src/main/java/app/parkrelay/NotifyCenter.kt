@@ -108,6 +108,7 @@ class NotifyCenter(private val context: Context) {
         if (withButtons) {
             builder.addAction(activityAction("다른 구역", MainActivity.ACTION_PICK_HEADING, 40))
             builder.addAction(serviceAction("알림 취소", ParkingService.ACTION_DECLINE_HEADING, 41))
+            builder.addAction(serviceAction("자리 없어요", ParkingService.ACTION_MISSED_HEADING, 42))
         } else {
             builder.setTimeoutAfter(LIST_BANNER_MILLIS)
         }

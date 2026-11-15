@@ -174,4 +174,19 @@ class BoardTest {
         assertEquals(listOf("B2-B", "B3-A", "B4-D"), floors.flatMap { it.zones }.map { it.zoneId })
         assertEquals(5, BoardText.byFloor(board).sumOf { it.zones.size })
     }
+
+    @Test
+    fun `a confirmed car is told apart from one still on its way`() {
+        val row = ZoneRow("B2-B", listOf(30_000, 60_000, 90_000), 0, 0, claims = 3, confirmed = 2)
+        assertEquals("앞차 2대 확정, 앞차 1대 가는 중", BoardText.note(row, null))
+        assertEquals("내가 확정, 앞차 1대 확정, 앞차 1대 가는 중", BoardText.note(row, "B2-B", mineConfirmed = true))
+        assertEquals("내가 가는 중, 앞차 2대 확정", BoardText.note(row, "B2-B"))
+    }
+
+    @Test
+    fun `a zone the driver found full is left out of the recommendation`() {
+        val board = LotBoard(null, 0, listOf(ZoneRow("B1-A", listOf(60_000), 0, 0), ZoneRow("B2-B", listOf(10_000, 20_000), 0, 0)))
+        assertEquals("B2-B", BoardText.recommend(board, null)?.zoneId)
+        assertEquals("B1-A", BoardText.recommend(board, null, setOf("B2-B"))?.zoneId)
+    }
 }

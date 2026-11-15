@@ -44,6 +44,7 @@ FAR_LAT, FAR_LNG = 37.6000, 127.1500
 ZONE = "B2-B"
 AHEAD_ZONE = "B1-A"  # A car ahead, posted by this script, heads for a departure here.
 LIVE_ZONE = "B1-C"   # A departure that happens while B is already near.
+NEXT_ZONE = "B3-C"   # Where B is pointed after finding no space in the zone it confirmed.
 REALIGN_WAIT_SECONDS = 65
 CONFIRM_BUTTON = (1500, 258)  # The rightmost button on a three-button banner, at 2560x1440.
 MAX_VOICE_LATENCY_MS = 3000
@@ -425,6 +426,49 @@ def run(a: Car, b: Car, server: str, out: Path, first_round: bool = True) -> int
                  "the server moved B's heading with it",
                  f"{ZONE}={zone_row(board).get('claims')} {LIVE_ZONE}={zone_row(board, LIVE_ZONE).get('claims')}")
 
+    print("\n== scene 3b: B drives into the lot, and its zone is confirmed")
+    b.wait_for(r"voice\] finished", timeout=15, since_ms=since_b)
+    since_b = b.now_ms()
+    b.move(LOT_LAT, LOT_LNG)
+    confirmed = b.wait_for(rf"publish\] CLAIM_CONFIRM lot={LOT_ID} zone={LIVE_ZONE}", timeout=10, since_ms=since_b)
+    report.check(confirmed is not None, "inside the lot, B confirms the zone it is heading for")
+    said = b.wait_for(r"voice\] focus .*주차장에 도착했어요\. 지하 1층 C구역으로 확정했어요", timeout=8, since_ms=since_b)
+    report.check(said is not None, "B tells its driver the zone is confirmed")
+    time.sleep(2)
+    row = zone_row(http(server, f"/v1/lots/{LOT_ID}/board"), LIVE_ZONE)
+    report.check(row.get("claims") == 1 and row.get("confirmed") == 1, "the server shows B's zone as confirmed",
+                 json.dumps(row, ensure_ascii=False)[:120])
+    repeats = [e.text for e in b.log(since_b) if "publish] CLAIM_CONFIRM" in e.text]
+    report.check(len(repeats) == 1, "the confirmation is sent once", str(len(repeats)))
+    b.wait_for(r"voice\] finished", timeout=10, since_ms=since_b)
+
+    print("\n== scene 3c: no space there, so the confirmation is cancelled and the next zone offered")
+    since_b = b.now_ms()
+    b.probe("check")  # The question the app asks by itself 90 seconds after confirming.
+    asked = b.wait_for(r"voice\] focus .*지하 1층 C구역에 자리가 없으면", timeout=8, since_ms=since_b)
+    report.check(asked is not None, "B asks once whether there was a space, so the driver can answer by voice")
+    b.wait_for(r"stt\] (silence timeout|cancelled|error|text=)", timeout=45, since_ms=since_b)
+    time.sleep(1)
+    post_events(server, [virtual("VACATED", NEXT_ZONE, "virtual-left-3", int(time.time() * 1000) - 30_000)])
+    time.sleep(2)
+    since_b = b.now_ms()
+    b.probe("missed")  # Stands in for the driver saying "자리 없어요".
+    missed = b.wait_for(rf"publish\] CLAIM_MISSED lot={LOT_ID} zone={LIVE_ZONE}", timeout=6, since_ms=since_b)
+    report.check(missed is not None, "B reports that the zone had no space")
+    again = b.wait_for(rf"publish\] CLAIM_CONFIRM lot={LOT_ID} zone={NEXT_ZONE}", timeout=6, since_ms=since_b)
+    report.check(again is not None, "B confirms the next zone at once")
+    said = b.wait_for(r"voice\] focus .*지하 1층 C구역 확정을 취소했어요\. 지하 3층 C구역에 1곳 있어요\. 그쪽으로 확정했어요",
+                      timeout=8, since_ms=since_b)
+    report.check(said is not None, "B tells its driver the change", said.text.split("text=")[-1] if said else "")
+    time.sleep(2)
+    board = http(server, f"/v1/lots/{LOT_ID}/board")
+    old, new = zone_row(board, LIVE_ZONE), zone_row(board, NEXT_ZONE)
+    report.check(old.get("vacancies") == [] and old.get("claims") == 0,
+                 "the server drops the stale departure, so no other car is sent there",
+                 json.dumps(old, ensure_ascii=False)[:120])
+    report.check(new.get("confirmed") == 1 and len(new.get("vacancies", [])) == 1, "the server shows the new zone as confirmed",
+                 json.dumps(new, ensure_ascii=False)[:120])
+
     print("\n== scene 4: B parks and confirms with one tap")
     time.sleep(11)
     gone = f"pkg={PACKAGE} " not in "\n".join(
@@ -437,15 +481,15 @@ def run(a: Car, b: Car, server: str, out: Path, first_round: bool = True) -> int
     b.gear("Reverse")
     time.sleep(2)
     b.gear("Park")
-    prompt = b.wait_for(r"notify\] post id=3 title=지하 1층 C구역에 내 차 위치 저장", timeout=25, since_ms=since_b)
-    report.check(prompt is not None, "B is offered the zone it said it was heading for")
+    prompt = b.wait_for(r"notify\] post id=3 title=지하 3층 C구역에 내 차 위치 저장", timeout=25, since_ms=since_b)
+    report.check(prompt is not None, "B is offered the zone it confirmed")
     time.sleep(1.5)
     b.shot(out / "b2_park_prompt.png")
     since_tap = b.now_ms()
     b.tap(*CONFIRM_BUTTON)
     report.check(b.wait_for(r"start action=app\.parkrelay\.CONFIRM_ZONE", timeout=6, since_ms=since_tap) is not None,
                  "the tap reaches the service")
-    parked = b.wait_for(rf"publish\] PARK lot={LOT_ID} zone={LIVE_ZONE}", timeout=8, since_ms=since_tap)
+    parked = b.wait_for(rf"publish\] PARK lot={LOT_ID} zone={NEXT_ZONE}", timeout=8, since_ms=since_tap)
     report.check(parked is not None, "B publishes its parking")
     released = b.wait_for(rf"publish\] CLAIM_CANCEL lot={LOT_ID}", timeout=3, since_ms=since_tap)
     report.check(released is not None and parked is not None and released.at_ms <= parked.at_ms,
@@ -454,7 +498,7 @@ def run(a: Car, b: Car, server: str, out: Path, first_round: bool = True) -> int
     b.shot(out / "b3_after_tap.png")
     report.check(b.navigation_on_top(), "the app never opened", b.top_activity())
     board = http(server, f"/v1/lots/{LOT_ID}/board")
-    row = zone_row(board, LIVE_ZONE)
+    row = zone_row(board, NEXT_ZONE)
     report.check(row.get("vacancies") == [] and row.get("claims") == 0 and board["parkedAppCars"] == 2,
                  "B's parking used up the departure, and two app cars are counted (B and the scripted one)",
                  f"vacancies={row.get('vacancies')} claims={row.get('claims')} parkedAppCars={board['parkedAppCars']}")

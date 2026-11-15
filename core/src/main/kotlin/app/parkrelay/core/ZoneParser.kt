@@ -5,6 +5,9 @@ sealed interface SpokenAnswer {
     data class Zone(val zoneId: String) : SpokenAnswer
     data object Yes : SpokenAnswer
     data object No : SpokenAnswer
+
+    /** "There is no space there." */
+    data object Full : SpokenAnswer
     data object NotUnderstood : SpokenAnswer
 }
 
@@ -32,10 +35,13 @@ object ZoneParser {
     private val YES = Regex("""^(네|예|응|어|맞아|맞아요|맞습니다|그래|그래요|좋아|좋아요|저장해|저장해줘)\b""")
     private val NO = Regex("""^(아니|아니요|아뇨|틀려|틀렸어|됐어|안\s*해|취소)""")
 
+    private val FULL = Regex("""없어|없네|없습니다|없다|만차|꽉\s*찼|못\s*(했|해|댔|대|세)""")
+
     fun parse(speech: String): SpokenAnswer {
         val text = speech.trim()
         zoneId(text)?.let { return SpokenAnswer.Zone(it) }
         return when {
+            FULL.containsMatchIn(text) -> SpokenAnswer.Full
             YES.containsMatchIn(text) -> SpokenAnswer.Yes
             NO.containsMatchIn(text) -> SpokenAnswer.No
             else -> SpokenAnswer.NotUnderstood

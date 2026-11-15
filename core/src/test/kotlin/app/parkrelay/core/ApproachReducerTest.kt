@@ -324,4 +324,101 @@ class ApproachReducerTest {
         assertEquals(ApproachPhase.NEAR, state.phase)
         assertEquals(1, effects.filterIsInstance<ApproachEffect.TellList>().size)
     }
+
+    // --- Confirmed once inside the lot, and released when there is no space ---
+
+    private fun types(h: Harness) = h.published.map { it.type to it.zoneId }
+
+    @Test
+    fun `entering the lot confirms the claim once, whatever the GPS does`() {
+        val h = harness().arrive(twoZones)
+        assertFalse(h.state.claim!!.confirmed)
+        h.feed(ApproachInput.Distance(-5.0, 5_000), ApproachInput.Distance(3.0, 6_000), ApproachInput.Distance(-20.0, 7_000))
+        assertTrue(h.state.claim!!.confirmed)
+        assertEquals(listOf(EventType.CLAIM to "B2-B", EventType.CLAIM_CONFIRM to "B2-B"), types(h))
+        assertEquals(listOf("주차장에 도착했어요. 지하 2층 B구역으로 확정했어요."), h.told)
+        assertTrue(h.published[1].occurredAt > h.published[0].occurredAt)
+    }
+
+    @Test
+    fun `a car that is first seen inside the lot hears the list and is confirmed in one go`() {
+        val h = harness().feed(ApproachInput.Distance(-10.0, 1_000), ApproachInput.Board(twoZones, 1_000))
+        assertTrue(h.state.claim!!.confirmed)
+        assertEquals("지하 2층 B구역으로 확정했어요. 다른 구역이면 말씀해 주세요.", h.lists.single().followUp)
+        assertTrue(h.lists.single().text.contains("내가 확정"))
+        assertTrue(h.told.isEmpty())
+    }
+
+    @Test
+    fun `a zone picked inside the lot is confirmed at once`() {
+        val h = harness().arrive(twoZones).feed(ApproachInput.Distance(-5.0, 5_000), ApproachInput.Pick("B1-A", 9_000))
+        assertEquals("B1-A", h.state.claimedZone)
+        assertTrue(h.state.claim!!.confirmed)
+        assertEquals(EventType.CLAIM_CONFIRM to "B1-A", types(h).last())
+        assertEquals("지하 1층 A구역으로 확정했어요.", h.told.last())
+    }
+
+    @Test
+    fun `no space there cancels the confirmation and confirms the next zone`() {
+        val h = harness().arrive(twoZones).feed(ApproachInput.Distance(-5.0, 5_000), ApproachInput.Missed(60_000))
+        assertEquals("B1-A", h.state.claimedZone)
+        assertTrue(h.state.claim!!.confirmed)
+        assertEquals(
+            listOf(EventType.CLAIM_MISSED to "B2-B", EventType.CLAIM to "B1-A", EventType.CLAIM_CONFIRM to "B1-A"),
+            types(h).drop(2),
+        )
+        assertEquals("지하 2층 B구역 확정을 취소했어요. 지하 1층 A구역에 1곳 있어요. 그쪽으로 확정했어요.", h.told.last())
+        val times = h.published.map { it.occurredAt }
+        assertEquals(times.sorted(), times)
+        assertEquals(times.toSet().size, times.size)
+    }
+
+    @Test
+    fun `a zone with no space is not recommended again on this approach`() {
+        val only = board(row("B2-B", listOf(30_000)))
+        val h = harness().arrive(only).feed(ApproachInput.Distance(-5.0, 5_000), ApproachInput.Missed(60_000))
+        assertNull(h.state.claim)
+        assertEquals("지하 2층 B구역 확정을 취소했어요. 다른 출차 소식이 생기면 알려 드릴게요.", h.told.last())
+        // The board in hand still lists the departure until the server has dropped it.
+        h.feed(ApproachInput.Board(only, 61_000))
+        assertNull(h.state.claim)
+        h.feed(ApproachInput.Board(board(row("B2-B", listOf(31_000)), row("B3-C", listOf(1_000))), 62_000))
+        assertEquals("B3-C", h.state.claimedZone)
+        assertEquals("지하 3층 C구역으로 확정했어요.", h.told.last())
+    }
+
+    @Test
+    fun `no space before entering the lot ends a claim that was not yet confirmed`() {
+        val h = harness().arrive(twoZones).feed(ApproachInput.Missed(60_000))
+        assertEquals("B1-A", h.state.claimedZone)
+        assertFalse(h.state.claim!!.confirmed)
+        assertEquals("지하 2층 B구역 가는 구역 알림을 취소했어요. 지하 1층 A구역에 1곳 있어요. 그쪽으로 간다고 알렸어요.", h.told.last())
+    }
+
+    @Test
+    fun `a car that tells nobody is not confirmed and reports nothing`() {
+        val h = harness(mayPublish = false).arrive(twoZones)
+            .feed(ApproachInput.Distance(-5.0, 5_000), ApproachInput.Missed(60_000))
+        assertTrue(h.published.isEmpty())
+        assertEquals("B1-A", h.state.claimedZone)
+        assertFalse(h.state.claim!!.confirmed)
+    }
+
+    @Test
+    fun `parking releases a confirmed claim`() {
+        val h = harness().arrive(twoZones).feed(ApproachInput.Distance(-5.0, 5_000), ApproachInput.Parked(90_000))
+        assertEquals(EventType.CLAIM_CANCEL to "B2-B", types(h).last())
+        assertEquals(ApproachPhase.ENDED, h.state.phase)
+    }
+
+    @Test
+    fun `another car parking in the confirmed zone moves the confirmation`() {
+        val h = harness().arrive(twoZones).feed(ApproachInput.Distance(-5.0, 5_000))
+        val taken = board(row("B1-A", listOf(250_000)), row("B2-B", parked = 2))
+        h.feed(ApproachInput.Board(board(row("B1-A", listOf(245_000)), row("B2-B", listOf(35_000), parked = 1)), 8_000))
+        h.feed(ApproachInput.Board(taken, 10_000))
+        assertEquals("B1-A", h.state.claimedZone)
+        assertTrue(h.state.claim!!.confirmed)
+        assertTrue(h.told.last().endsWith("지하 1층 A구역에 1곳 있어요. 그쪽으로 확정했어요."))
+    }
 }
